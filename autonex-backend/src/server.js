@@ -15,7 +15,7 @@ const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: {
-    origin: 'http://localhost:5173',
+    origin: '*', // Accept all origins (better for production: whitelist specific Netlify domain)
     methods: ['GET', 'POST']
   }
 });
