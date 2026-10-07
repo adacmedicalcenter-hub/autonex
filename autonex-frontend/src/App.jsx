@@ -26,11 +26,11 @@ export default function App() {
   const socketRef = useRef(null);
 
   // Form state
-  const [phoneNumber, setPhoneNumber] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [rememberMe, setRememberMe] = useState(false);
-  const [savedPhones, setSavedPhones] = useState([]);
-  const [showPhoneSuggestions, setShowPhoneSuggestions] = useState(false);
+  const [savedEmails, setSavedEmails] = useState([]);
+  const [showEmailSuggestions, setShowEmailSuggestions] = useState(false);
   const [fullNameInput, setFullNameInput] = useState('');
   const [requestTitle, setRequestTitle] = useState('');
   const [requestDesc, setRequestDesc] = useState('');
@@ -52,20 +52,20 @@ export default function App() {
   const [editSpecialization, setEditSpecialization] = useState('');
   const [editHourlyRate, setEditHourlyRate] = useState('');
   const [editLocation, setEditLocation] = useState('');
-  const [servicePhoneNumber, setServicePhoneNumber] = useState('');
-  const [editServicePhoneNumber, setEditServicePhoneNumber] = useState('');
+  const [phoneNumber, setPhoneNumber] = useState('');
+  const [editPhoneNumber, setEditPhoneNumber] = useState('');
 
   const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
 
   // Check for saved login on app load
   useEffect(() => {
-    // Load saved phone numbers
-    const phones = localStorage.getItem('autonex_saved_phones');
-    if (phones) {
+    // Load saved emails
+    const emails = localStorage.getItem('autonex_saved_emails');
+    if (emails) {
       try {
-        setSavedPhones(JSON.parse(phones));
+        setSavedEmails(JSON.parse(emails));
       } catch (error) {
-        console.error('Error loading saved phones:', error);
+        console.error('Error loading saved emails:', error);
       }
     }
 
@@ -78,7 +78,7 @@ export default function App() {
         setUserType(user.userType);
         setFullName(user.fullName);
         setAuthState('dashboard');
-        setPhoneNumber(user.phoneNumber);
+        setEmail(user.email);
         setRememberMe(true);
         loadConversations(user.token, user.userId);
       } catch (error) {
@@ -107,17 +107,10 @@ export default function App() {
     }
   }, [token, userId]);
 
-  // Auto-populate phone number when mechanic opens post-service tab
-  useEffect(() => {
-    if (activeTab === 'post-service' && userType === 'mechanic' && phoneNumber && !servicePhoneNumber) {
-      setServicePhoneNumber(phoneNumber);
-    }
-  }, [activeTab, userType, phoneNumber, servicePhoneNumber]);
-
   const handleRegister = async () => {
     setErrorMsg('');
     setSuccessMsg('');
-    if (!fullNameInput || !phoneNumber || !password) {
+    if (!fullNameInput || !email || !password) {
       setErrorMsg('Please fill in all fields');
       return;
     }
@@ -128,7 +121,7 @@ export default function App() {
         body: JSON.stringify({
           user_type: userType,
           full_name: fullNameInput,
-          phone_number: phoneNumber,
+          email,
           password
         })
       });
@@ -136,7 +129,7 @@ export default function App() {
       if (response.ok) {
         setSuccessMsg('Registration successful! Please log in.');
         setAuthState('login');
-        setPhoneNumber('');
+        setEmail('');
         setPassword('');
         setFullNameInput('');
       } else {
@@ -150,7 +143,7 @@ export default function App() {
   const handleLogin = async () => {
     setErrorMsg('');
     setSuccessMsg('');
-    if (!phoneNumber || !password) {
+    if (!email || !password) {
       setErrorMsg('Please fill in all fields');
       return;
     }
@@ -158,7 +151,7 @@ export default function App() {
       const response = await fetch(`${API_URL}/api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone_number: phoneNumber, password })
+        body: JSON.stringify({ email, password })
       });
       const data = await response.json();
       if (response.ok) {
@@ -169,10 +162,10 @@ export default function App() {
         setAuthState('dashboard');
         setSuccessMsg('Login successful!');
 
-        // Save phone to saved phones list
-        setSavedPhones(prev => {
-          const updated = prev.includes(phoneNumber) ? prev : [phoneNumber, ...prev].slice(0, 5);
-          localStorage.setItem('autonex_saved_phones', JSON.stringify(updated));
+        // Save email to saved emails list
+        setSavedEmails(prev => {
+          const updated = prev.includes(email) ? prev : [email, ...prev].slice(0, 5); // Keep last 5 emails
+          localStorage.setItem('autonex_saved_emails', JSON.stringify(updated));
           return updated;
         });
 
@@ -183,7 +176,7 @@ export default function App() {
             userId: data.userId,
             userType: data.userType,
             fullName: data.fullName,
-            phoneNumber: phoneNumber
+            email: email
           }));
         } else {
           localStorage.removeItem('autonex_user');
@@ -268,7 +261,7 @@ export default function App() {
 
   const handlePostService = async () => {
     setErrorMsg('');
-    if (!serviceName || !serviceDesc || !specialization || !hourlyRate || !location || !servicePhoneNumber) {
+    if (!serviceName || !serviceDesc || !specialization || !hourlyRate || !location || !phoneNumber) {
       setErrorMsg('Please fill in all fields');
       return;
     }
@@ -285,7 +278,7 @@ export default function App() {
           specialization,
           hourly_rate: parseFloat(hourlyRate),
           location,
-          phone_number: servicePhoneNumber,
+          phone_number: phoneNumber,
           availability: 'Available'
         })
       });
@@ -295,7 +288,7 @@ export default function App() {
         setServiceDesc('');
         setSpecialization('');
         setHourlyRate('');
-        setServicePhoneNumber('');
+        setPhoneNumber('');
         setLocation('');
         loadAllServices();
       } else {
@@ -324,13 +317,13 @@ export default function App() {
     setEditServiceDesc(service.description);
     setEditSpecialization(service.specialization);
     setEditHourlyRate(service.hourly_rate);
-    setEditServicePhoneNumber(service.phone_number);
+    setEditPhoneNumber(service.phone_number);
     setEditLocation(service.location);
   };
 
   const handleEditService = async () => {
     setErrorMsg('');
-    if (!editServiceName || !editServiceDesc || !editSpecialization || !editHourlyRate || !editLocation || !editServicePhoneNumber) {
+    if (!editServiceName || !editServiceDesc || !editSpecialization || !editHourlyRate || !editLocation || !editPhoneNumber) {
       setErrorMsg('Please fill in all fields');
       return;
     }
@@ -347,7 +340,7 @@ export default function App() {
           specialization: editSpecialization,
           hourly_rate: parseFloat(editHourlyRate),
           location: editLocation,
-          phone_number: editServicePhoneNumber,
+          phone_number: editPhoneNumber,
           availability: 'Available'
         })
       });
@@ -472,10 +465,10 @@ export default function App() {
     setMessageInput('');
   };
 
-  const removeSavedPhone = (phoneToRemove) => {
-    const updated = savedPhones.filter(p => p !== phoneToRemove);
-    setSavedPhones(updated);
-    localStorage.setItem('autonex_saved_phones', JSON.stringify(updated));
+  const removeSavedEmail = (emailToRemove) => {
+    const updated = savedEmails.filter(e => e !== emailToRemove);
+    setSavedEmails(updated);
+    localStorage.setItem('autonex_saved_emails', JSON.stringify(updated));
   };
 
   const handleLogout = () => {
@@ -487,7 +480,7 @@ export default function App() {
     setConversations([]);
     setMessages([]);
     setSelectedConversation(null);
-    setPhoneNumber('');
+    setEmail('');
     setPassword('');
     setRememberMe(false);
     localStorage.removeItem('autonex_user');
@@ -529,15 +522,15 @@ export default function App() {
           value={fullNameInput}
           onChange={(e) => setFullNameInput(e.target.value)}
           onKeyPress={(e) => e.key === 'Enter' && handleRegister()}
-          style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '16px', borderRadius: '5px', border: '1px solid #ddd', boxSizing: 'border-box' }}
+          style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '16px', borderRadius: '5px', border: '1px solid #ddd' }}
         />
         <input
-          type="tel"
-          placeholder="Phone Number"
-          value={phoneNumber}
-          onChange={(e) => setPhoneNumber(e.target.value)}
+          type="email"
+          placeholder="Email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
           onKeyPress={(e) => e.key === 'Enter' && handleRegister()}
-          style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '16px', borderRadius: '5px', border: '1px solid #ddd', boxSizing: 'border-box' }}
+          style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '16px', borderRadius: '5px', border: '1px solid #ddd' }}
         />
         <input
           type="password"
@@ -545,7 +538,7 @@ export default function App() {
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           onKeyPress={(e) => e.key === 'Enter' && handleRegister()}
-          style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '16px', borderRadius: '5px', border: '1px solid #ddd', boxSizing: 'border-box' }}
+          style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '16px', borderRadius: '5px', border: '1px solid #ddd' }}
         />
         <button
           onClick={handleRegister}
@@ -572,26 +565,26 @@ export default function App() {
         {successMsg && <p style={{ color: 'green' }}>{successMsg}</p>}
         <div style={{ position: 'relative' }}>
           <input
-            type="tel"
-            placeholder="Phone Number"
-            value={phoneNumber}
+            type="email"
+            placeholder="Email"
+            value={email}
             onChange={(e) => {
-              setPhoneNumber(e.target.value);
-              setShowPhoneSuggestions(true);
+              setEmail(e.target.value);
+              setShowEmailSuggestions(true);
             }}
-            onFocus={() => setShowPhoneSuggestions(true)}
-            onBlur={() => setTimeout(() => setShowPhoneSuggestions(false), 200)}
+            onFocus={() => setShowEmailSuggestions(true)}
+            onBlur={() => setTimeout(() => setShowEmailSuggestions(false), 200)}
             onKeyPress={(e) => e.key === 'Enter' && handleLogin()}
             style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '16px', borderRadius: '5px', border: '1px solid #ddd', boxSizing: 'border-box' }}
           />
-          {showPhoneSuggestions && savedPhones.length > 0 && (
+          {showEmailSuggestions && savedEmails.length > 0 && (
             <div style={{ position: 'absolute', top: '100%', left: '0', right: '0', backgroundColor: 'white', border: '1px solid #ddd', borderTop: 'none', borderRadius: '0 0 5px 5px', maxHeight: '200px', overflowY: 'auto', zIndex: '10' }}>
-              {savedPhones.map((savedPhone, idx) => (
+              {savedEmails.map((savedEmail, idx) => (
                 <div
                   key={idx}
                   style={{
                     padding: '12px 10px',
-                    borderBottom: idx < savedPhones.length - 1 ? '1px solid #eee' : 'none',
+                    borderBottom: idx < savedEmails.length - 1 ? '1px solid #eee' : 'none',
                     cursor: 'pointer',
                     display: 'flex',
                     justifyContent: 'space-between',
@@ -601,15 +594,15 @@ export default function App() {
                   onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#f0f0f0'}
                   onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'white'}
                   onClick={() => {
-                    setPhoneNumber(savedPhone);
-                    setShowPhoneSuggestions(false);
+                    setEmail(savedEmail);
+                    setShowEmailSuggestions(false);
                   }}
                 >
-                  <span style={{ display: 'flex', alignItems: 'center' }}>📱 {savedPhone}</span>
+                  <span style={{ display: 'flex', alignItems: 'center' }}>📧 {savedEmail}</span>
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      removeSavedPhone(savedPhone);
+                      removeSavedEmail(savedEmail);
                     }}
                     style={{
                       background: 'none',
@@ -619,7 +612,7 @@ export default function App() {
                       fontSize: '16px',
                       padding: '0 5px'
                     }}
-                    title="Remove this phone"
+                    title="Remove this email"
                   >
                     ✕
                   </button>
@@ -634,7 +627,7 @@ export default function App() {
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           onKeyPress={(e) => e.key === 'Enter' && handleLogin()}
-          style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '16px', borderRadius: '5px', border: '1px solid #ddd', boxSizing: 'border-box' }}
+          style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '16px', borderRadius: '5px', border: '1px solid #ddd' }}
         />
         <div style={{ margin: '10px 0', display: 'flex', alignItems: 'center' }}>
           <input
@@ -720,10 +713,10 @@ export default function App() {
           {userType === 'driver' && activeTab === 'post-request' && (
             <div>
               <h3>Post a Repair Request</h3>
-              <input type="text" placeholder="Service Title" value={requestTitle} onChange={(e) => setRequestTitle(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd', boxSizing: 'border-box' }} />
-              <textarea placeholder="Describe your issue" value={requestDesc} onChange={(e) => setRequestDesc(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd', minHeight: '100px', boxSizing: 'border-box' }}></textarea>
-              <input type="text" placeholder="Vehicle Type" value={vehicleType} onChange={(e) => setVehicleType(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd', boxSizing: 'border-box' }} />
-              <input type="text" placeholder="Location" value={location} onChange={(e) => setLocation(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd', boxSizing: 'border-box' }} />
+              <input type="text" placeholder="Service Title" value={requestTitle} onChange={(e) => setRequestTitle(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd' }} />
+              <textarea placeholder="Describe your issue" value={requestDesc} onChange={(e) => setRequestDesc(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd', minHeight: '100px' }}></textarea>
+              <input type="text" placeholder="Vehicle Type" value={vehicleType} onChange={(e) => setVehicleType(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd' }} />
+              <input type="text" placeholder="Location" value={location} onChange={(e) => setLocation(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd' }} />
               <button onClick={handlePostRequest} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '16px', backgroundColor: '#007bff', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer' }}>Post Request</button>
             </div>
           )}
@@ -773,12 +766,12 @@ export default function App() {
           {userType === 'mechanic' && activeTab === 'my-services' && editingServiceId && (
             <div>
               <h3>Edit Service</h3>
-              <input type="text" placeholder="Service Name" value={editServiceName} onChange={(e) => setEditServiceName(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd', boxSizing: 'border-box' }} />
-              <textarea placeholder="Describe your service" value={editServiceDesc} onChange={(e) => setEditServiceDesc(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd', minHeight: '100px', boxSizing: 'border-box' }}></textarea>
-              <input type="text" placeholder="Specialization" value={editSpecialization} onChange={(e) => setEditSpecialization(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd', boxSizing: 'border-box' }} />
-              <input type="text" placeholder="Location" value={editLocation} onChange={(e) => setEditLocation(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd', boxSizing: 'border-box' }} />
-              <input type="number" placeholder="Hourly Rate" value={editHourlyRate} onChange={(e) => setEditHourlyRate(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd', boxSizing: 'border-box' }} />
-              <input type="tel" placeholder="Phone Number" value={editServicePhoneNumber} onChange={(e) => setEditServicePhoneNumber(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd', boxSizing: 'border-box' }} />
+              <input type="text" placeholder="Service Name" value={editServiceName} onChange={(e) => setEditServiceName(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd' }} />
+              <textarea placeholder="Describe your service" value={editServiceDesc} onChange={(e) => setEditServiceDesc(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd', minHeight: '100px' }}></textarea>
+              <input type="text" placeholder="Specialization" value={editSpecialization} onChange={(e) => setEditSpecialization(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd' }} />
+              <input type="text" placeholder="Location" value={editLocation} onChange={(e) => setEditLocation(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd' }} />
+              <input type="number" placeholder="Hourly Rate" value={editHourlyRate} onChange={(e) => setEditHourlyRate(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd' }} />
+              <input type="tel" placeholder="Phone Number" value={editPhoneNumber} onChange={(e) => setEditPhoneNumber(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd' }} />
               <button onClick={handleEditService} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '16px', backgroundColor: '#28a745', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer' }}>Save Changes</button>
               <button onClick={() => setEditingServiceId(null)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '16px', backgroundColor: '#6c757d', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer' }}>Cancel</button>
             </div>
@@ -787,12 +780,12 @@ export default function App() {
           {userType === 'mechanic' && activeTab === 'post-service' && (
             <div>
               <h3>Post a Service</h3>
-              <input type="text" placeholder="Service Name" value={serviceName} onChange={(e) => setServiceName(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd', boxSizing: 'border-box' }} />
-              <textarea placeholder="Describe your service" value={serviceDesc} onChange={(e) => setServiceDesc(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd', minHeight: '100px', boxSizing: 'border-box' }}></textarea>
-              <input type="text" placeholder="Specialization" value={specialization} onChange={(e) => setSpecialization(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd', boxSizing: 'border-box' }} />
-              <input type="text" placeholder="Location" value={location} onChange={(e) => setLocation(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd', boxSizing: 'border-box' }} />
-              <input type="number" placeholder="Hourly Rate" value={hourlyRate} onChange={(e) => setHourlyRate(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd', boxSizing: 'border-box' }} />
-              <input type="tel" placeholder="Phone Number" value={servicePhoneNumber} onChange={(e) => setServicePhoneNumber(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd', boxSizing: 'border-box' }} />
+              <input type="text" placeholder="Service Name" value={serviceName} onChange={(e) => setServiceName(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd' }} />
+              <textarea placeholder="Describe your service" value={serviceDesc} onChange={(e) => setServiceDesc(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd', minHeight: '100px' }}></textarea>
+              <input type="text" placeholder="Specialization" value={specialization} onChange={(e) => setSpecialization(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd' }} />
+              <input type="text" placeholder="Location" value={location} onChange={(e) => setLocation(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd' }} />
+              <input type="number" placeholder="Hourly Rate" value={hourlyRate} onChange={(e) => setHourlyRate(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd' }} />
+              <input type="tel" placeholder="Phone Number" value={phoneNumber} onChange={(e) => setPhoneNumber(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd' }} />
               <button onClick={handlePostService} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '16px', backgroundColor: '#28a745', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer' }}>Post Service</button>
             </div>
           )}
@@ -817,9 +810,9 @@ export default function App() {
           {userType === 'mechanic' && activeTab === 'submit-quote' && selectedRequest && (
             <div>
               <h3>Submit Quote</h3>
-              <input type="number" placeholder="Quote Price" value={quotePrice} onChange={(e) => setQuotePrice(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd', boxSizing: 'border-box' }} />
-              <input type="text" placeholder="Estimated Time (e.g., 2 hours)" value={estimatedTime} onChange={(e) => setEstimatedTime(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd', boxSizing: 'border-box' }} />
-              <textarea placeholder="Quote description" value={quoteDesc} onChange={(e) => setQuoteDesc(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd', minHeight: '100px', boxSizing: 'border-box' }}></textarea>
+              <input type="number" placeholder="Quote Price" value={quotePrice} onChange={(e) => setQuotePrice(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd' }} />
+              <input type="text" placeholder="Estimated Time (e.g., 2 hours)" value={estimatedTime} onChange={(e) => setEstimatedTime(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd' }} />
+              <textarea placeholder="Quote description" value={quoteDesc} onChange={(e) => setQuoteDesc(e.target.value)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd', minHeight: '100px' }}></textarea>
               <button onClick={() => handleSubmitQuote(selectedRequest)} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '16px', backgroundColor: '#28a745', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer' }}>Submit Quote</button>
               <button onClick={() => { setSelectedRequest(null); setActiveTab('browse-requests'); }} style={{ width: '100%', margin: '10px 0', padding: '10px', fontSize: '16px', backgroundColor: '#6c757d', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer' }}>Cancel</button>
             </div>
@@ -867,7 +860,7 @@ export default function App() {
                       value={messageInput}
                       onChange={(e) => setMessageInput(e.target.value)}
                       onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
-                      style={{ flex: 1, padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd', boxSizing: 'border-box' }}
+                      style={{ flex: 1, padding: '10px', fontSize: '14px', borderRadius: '5px', border: '1px solid #ddd' }}
                     />
                     <button onClick={handleSendMessage} style={{ padding: '10px 15px', backgroundColor: '#007bff', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer' }}>Send</button>
                   </div>

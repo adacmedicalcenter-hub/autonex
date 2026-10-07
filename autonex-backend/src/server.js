@@ -15,7 +15,7 @@ const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: {
-    origin: '*', // Accept all origins (better for production: whitelist specific Netlify domain)
+    origin: 'http://localhost:5173',
     methods: ['GET', 'POST']
   }
 });
@@ -39,11 +39,11 @@ const verifyToken = (req, res, next) => {
 
 app.post('/api/auth/register', async (req, res) => {
   try {
-    const { user_type, full_name, phone_number, password } = req.body;
+    const { user_type, full_name, email, password } = req.body;
     const schema = Joi.object({
       user_type: Joi.string().valid('driver', 'mechanic').required(),
       full_name: Joi.string().min(3).required(),
-      phone_number: Joi.string().min(9).required(),
+      email: Joi.string().email().required(),
       password: Joi.string().min(6).required()
     });
     const { error } = schema.validate(req.body);
@@ -51,23 +51,19 @@ app.post('/api/auth/register', async (req, res) => {
 
     const hashedPassword = await bcryptjs.hash(password, 10);
     const result = await pool.query(
-      'INSERT INTO users (user_type, full_name, phone_number, password_hash) VALUES ($1, $2, $3, $4) RETURNING id, user_type, phone_number, full_name',
-      [user_type, full_name, phone_number, hashedPassword]
+      'INSERT INTO users (user_type, full_name, email, password_hash) VALUES ($1, $2, $3, $4) RETURNING id, user_type, email',
+      [user_type, full_name, email, hashedPassword]
     );
     res.json({ message: 'User registered successfully', user: result.rows[0] });
   } catch (error) {
-    if (error.message.includes('duplicate key')) {
-      res.status(400).json({ error: 'Phone number already registered' });
-    } else {
-      res.status(500).json({ error: error.message });
-    }
+    res.status(500).json({ error: error.message });
   }
 });
 
 app.post('/api/auth/login', async (req, res) => {
   try {
-    const { phone_number, password } = req.body;
-    const result = await pool.query('SELECT * FROM users WHERE phone_number = $1', [phone_number]);
+    const { email, password } = req.body;
+    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
     if (result.rows.length === 0) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
@@ -83,7 +79,7 @@ app.post('/api/auth/login', async (req, res) => {
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
-    res.json({ token, userId: user.id, userType: user.user_type, fullName: user.full_name, phoneNumber: user.phone_number });
+    res.json({ token, userId: user.id, userType: user.user_type, fullName: user.full_name });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -160,10 +156,21 @@ app.patch('/api/service-offers/:id', verifyToken, async (req, res) => {
       return res.status(403).json({ error: 'You can only edit your own services' });
     }
 
-    const result = await pool.query(
-      'UPDATE service_offers SET service_name = $1, description = $2, specialization = $3, hourly_rate = $4, location = $5, phone_number = $6, availability = $7 WHERE id = $8 RETURNING *',
-      [service_name, description, specialization, hourly_rate, location, phone_number, availability, id]
-    );
+    // Try update with phone_number first
+    let result;
+    try {
+      result = await pool.query(
+        'UPDATE service_offers SET service_name = $1, description = $2, specialization = $3, hourly_rate = $4, location = $5, phone_number = $6, availability = $7 WHERE id = $8 RETURNING *',
+        [service_name, description, specialization, hourly_rate, location, phone_number, availability, id]
+      );
+    } catch (phoneError) {
+      // If phone_number column doesn't exist, try without it
+      console.log('Phone number update failed, trying without phone_number:', phoneError.message);
+      result = await pool.query(
+        'UPDATE service_offers SET service_name = $1, description = $2, specialization = $3, hourly_rate = $4, location = $5, availability = $6 WHERE id = $7 RETURNING *',
+        [service_name, description, specialization, hourly_rate, location, availability, id]
+      );
+    }
 
     console.log('Update successful:', result.rows[0]);
     res.json(result.rows[0]);
@@ -175,20 +182,28 @@ app.patch('/api/service-offers/:id', verifyToken, async (req, res) => {
 
 app.delete('/api/service-offers/:id', verifyToken, async (req, res) => {
   try {
+    console.log('Delete request - User ID:', req.userId, 'User Type:', req.userType, 'Service ID:', req.params.id);
+
     if (req.userType !== 'mechanic') {
+      console.log('User is not a mechanic');
       return res.status(403).json({ error: 'Only mechanics can delete services' });
     }
     const { id } = req.params;
 
     // Verify ownership
     const serviceCheck = await pool.query('SELECT mechanic_id FROM service_offers WHERE id = $1', [id]);
+    console.log('Service check result:', serviceCheck.rows);
+
     if (serviceCheck.rows.length === 0 || serviceCheck.rows[0].mechanic_id !== req.userId) {
+      console.log('Service not found or user does not own this service');
       return res.status(403).json({ error: 'You can only delete your own services' });
     }
 
-    await pool.query('DELETE FROM service_offers WHERE id = $1', [id]);
+    const deleteResult = await pool.query('DELETE FROM service_offers WHERE id = $1', [id]);
+    console.log('Delete successful, rows affected:', deleteResult.rowCount);
     res.json({ message: 'Service deleted successfully' });
   } catch (error) {
+    console.log('Delete error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
