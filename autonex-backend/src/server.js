@@ -15,7 +15,7 @@ const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: {
-    origin: 'http://localhost:5173',
+    origin: '*',
     methods: ['GET', 'POST']
   }
 });
@@ -317,6 +317,11 @@ io.on('connection', (socket) => {
         'UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = $1',
         [conversationId]
       );
+
+      // Get sender details for complete message object
+      const senderResult = await pool.query('SELECT full_name FROM users WHERE id = $1', [senderId]);
+      const senderName = senderResult.rows[0]?.full_name || 'Unknown User';
+
       const message = result.rows[0];
       io.to('conversation_' + conversationId).emit('receive_message', {
         id: message.id,
@@ -324,7 +329,8 @@ io.on('connection', (socket) => {
         sender_id: message.sender_id,
         sender_type: message.sender_type,
         message_text: message.message_text,
-        created_at: message.created_at
+        created_at: message.created_at,
+        sender_name: senderName
       });
     } catch (error) {
       socket.emit('message_error', { error: error.message });
