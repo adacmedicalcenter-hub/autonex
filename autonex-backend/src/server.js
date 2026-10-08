@@ -39,11 +39,11 @@ const verifyToken = (req, res, next) => {
 
 app.post('/api/auth/register', async (req, res) => {
   try {
-    const { user_type, full_name, email, password } = req.body;
+    const { user_type, full_name, phone_number, password } = req.body;
     const schema = Joi.object({
       user_type: Joi.string().valid('driver', 'mechanic').required(),
       full_name: Joi.string().min(3).required(),
-      email: Joi.string().email().required(),
+      phone_number: Joi.string().required(),
       password: Joi.string().min(6).required()
     });
     const { error } = schema.validate(req.body);
@@ -51,8 +51,8 @@ app.post('/api/auth/register', async (req, res) => {
 
     const hashedPassword = await bcryptjs.hash(password, 10);
     const result = await pool.query(
-      'INSERT INTO users (user_type, full_name, email, password_hash) VALUES ($1, $2, $3, $4) RETURNING id, user_type, email',
-      [user_type, full_name, email, hashedPassword]
+      'INSERT INTO users (user_type, full_name, phone_number, password_hash) VALUES ($1, $2, $3, $4) RETURNING id, user_type, phone_number',
+      [user_type, full_name, phone_number, hashedPassword]
     );
     res.json({ message: 'User registered successfully', user: result.rows[0] });
   } catch (error) {
@@ -62,8 +62,8 @@ app.post('/api/auth/register', async (req, res) => {
 
 app.post('/api/auth/login', async (req, res) => {
   try {
-    const { email, password } = req.body;
-    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    const { phone_number, password } = req.body;
+    const result = await pool.query('SELECT * FROM users WHERE phone_number = $1', [phone_number]);
     if (result.rows.length === 0) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
