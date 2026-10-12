@@ -1,0 +1,33 @@
+-- Additive correction. Apply only to a separate test database until reviewed for production.
+ALTER TABLE reservations ADD COLUMN IF NOT EXISTS fee_type VARCHAR(50);
+UPDATE reservations SET fee_type = CASE WHEN u.user_type='driver' THEN 'connection_fee_driver' ELSE 'connection_fee_mechanic' END FROM users u WHERE u.id=reservations.user_id AND reservations.fee_type IS NULL;
+ALTER TABLE reservations ADD COLUMN IF NOT EXISTS journey_id INTEGER REFERENCES journeys(id);
+ALTER TABLE reservations DROP CONSTRAINT IF EXISTS reservations_reservation_type_check;
+ALTER TABLE reservations ADD CONSTRAINT reservations_reservation_type_check CHECK (reservation_type IN ('connection_fee','service_deposit','connection_fee_driver','connection_fee_mechanic')) NOT VALID;
+CREATE UNIQUE INDEX IF NOT EXISTS one_live_fee_per_participant ON reservations(user_id,repair_request_id,fee_type) WHERE status IN ('reserved','collected');
+ALTER TABLE wallets ADD CONSTRAINT valid_wallet_amounts CHECK(balance>=0 AND reserved>=0 AND reserved<=balance) NOT VALID;
+-- Compute availability whenever wallet amounts change; old reservation trigger ran too early.
+DROP TRIGGER IF EXISTS trg_update_wallet_on_reservation ON reservations;
+CREATE OR REPLACE FUNCTION sync_wallet_available() RETURNS TRIGGER AS $$ BEGIN NEW.available=NEW.balance-NEW.reserved; NEW.last_updated=CURRENT_TIMESTAMP; RETURN NEW; END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS sync_wallet ON wallets;
+CREATE TRIGGER sync_wallet BEFORE INSERT OR UPDATE ON wallets FOR EACH ROW EXECUTE FUNCTION sync_wallet_available();
+UPDATE wallets SET available=balance-reserved;
+ALTER TABLE journeys DROP CONSTRAINT IF EXISTS journeys_status_check;
+ALTER TABLE journeys ADD CONSTRAINT journeys_status_check CHECK(status IN ('active','driver_arrived','mechanic_arrived','both_arrived','service_started','service_completed','completed','cancelled','expired','disputed')) NOT VALID;
+ALTER TABLE journeys ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP DEFAULT (CURRENT_TIMESTAMP+INTERVAL '120 minutes');
+ALTER TABLE journeys ADD COLUMN IF NOT EXISTS destination_latitude DECIMAL(10,8);
+ALTER TABLE journeys ADD COLUMN IF NOT EXISTS destination_longitude DECIMAL(11,8);
+UPDATE journeys SET destination_latitude=r.latitude,destination_longitude=r.longitude FROM repair_requests r WHERE r.id=journeys.repair_request_id AND journeys.destination_latitude IS NULL;
+ALTER TABLE journeys ADD COLUMN IF NOT EXISTS driver_pin_hash TEXT;
+ALTER TABLE journeys ADD COLUMN IF NOT EXISTS driver_pin_cipher TEXT;
+ALTER TABLE journeys ADD COLUMN IF NOT EXISTS driver_pin_expires_at TIMESTAMP;
+ALTER TABLE journeys ADD COLUMN IF NOT EXISTS pin_attempts INTEGER DEFAULT 0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS availability BOOLEAN DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS location_updated_at TIMESTAMP;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS specialization TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS locality TEXT;
+ALTER TABLE location_tracking ADD COLUMN IF NOT EXISTS sampled_at TIMESTAMP;
+CREATE TABLE IF NOT EXISTS payment_receipts(reference TEXT PRIMARY KEY,user_id INTEGER REFERENCES users(id),amount INTEGER NOT NULL CHECK(amount>0),provider TEXT NOT NULL,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS admin_audit(id SERIAL PRIMARY KEY,admin_id INTEGER REFERENCES users(id),action TEXT NOT NULL,details JSONB NOT NULL,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+CREATE UNIQUE INDEX IF NOT EXISTS one_pending_quote ON quotes(repair_request_id,mechanic_id) WHERE status IN ('pending','accepted');
+INSERT INTO admin_config(config_key,config_value) VALUES ('arrival_radius_m','50'),('arrival_accuracy_m','30'),('arrival_dwell_s','10'),('location_fresh_s','30') ON CONFLICT(config_key) DO NOTHING;
