@@ -1,0 +1,73 @@
+import { distance, transaction } from './workflowService.js';
+export const PUSH_PROJECT = 'autonex-test-b13ab';
+export async function firebaseSender(raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+ if (!raw) return null;
+ let config;
+ try { config = JSON.parse(raw); } catch { throw new Error('FIREBASE_SERVICE_ACCOUNT_JSON must contain valid JSON'); }
+ if (config.project_id !== PUSH_PROJECT || !config.private_key || !config.client_email)
+   throw new Error('Firebase credentials must belong to the AutoNex test project');
+ const { initializeApp, cert } = await import('firebase-admin/app');
+ const { getMessaging } = await import('firebase-admin/messaging');
+ const app = initializeApp({ credential: cert(config) }, 'autonex-pilot');
+ return message => getMessaging(app).send(message);
+}
+export function pushRadius() { return 5000; }
+export async function queueRequestAlerts(c, request) {
+ const devices = (await c.query(`SELECT d.installation_id,d.user_id,u.location_latitude,u.location_longitude
+ FROM push_devices d JOIN users u ON u.id=d.user_id
+ WHERE u.user_type='mechanic' AND u.availability=TRUE AND NOT u.suspended AND u.is_active=TRUE
+ AND u.location_updated_at>CURRENT_TIMESTAMP-INTERVAL '24 hours'
+ AND d.updated_at>CURRENT_TIMESTAMP-INTERVAL '30 days'
+ AND u.location_latitude IS NOT NULL AND u.location_longitude IS NOT NULL`)).rows;
+ let queued = 0;
+ for (const d of devices) {
+   if (distance(request, {latitude:d.location_latitude,longitude:d.location_longitude}) > pushRadius()) continue;
+   const inserted = await c.query(`INSERT INTO push_outbox(event_key,user_id,installation_id,repair_request_id,kind,expires_at)
+   VALUES($1,$2,$3,$4,'request',$5) ON CONFLICT DO NOTHING RETURNING id`,
+   ['request_'+request.id,d.user_id,d.installation_id,request.id,request.expires_at]);
+   queued += inserted.rows.length;
+ }
+ return queued;
+}
+export async function drainPush(pool, send, limit=20) {
+ if (!send) return 0;
+ let processed=0;
+ for (let i=0; i<limit; i++) {
+   const found = await transaction(pool, async c => {
+     const row = (await c.query(`SELECT * FROM push_outbox WHERE status='pending'
+       AND next_attempt_at<=CURRENT_TIMESTAMP ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1`)).rows[0];
+     if (!row) return false;
+     const device = (await c.query(`SELECT d.token,u.availability,u.suspended,u.is_active
+       FROM push_devices d JOIN users u ON u.id=d.user_id
+       WHERE d.installation_id=$1 AND d.user_id=$2 AND d.updated_at>CURRENT_TIMESTAMP-INTERVAL '30 days'`,
+       [row.installation_id,row.user_id])).rows[0];
+     const request = row.repair_request_id ? (await c.query('SELECT status,expires_at FROM repair_requests WHERE id=$1',[row.repair_request_id])).rows[0] : null;
+     if (!device || device.suspended || !device.is_active || new Date(row.expires_at)<=new Date() ||
+       (row.kind==='request' && (!device.availability || request?.status!=='open' || new Date(request.expires_at)<=new Date()))) {
+       await c.query("UPDATE push_outbox SET status='skipped' WHERE id=$1",[row.id]);
+       return true;
+     }
+     try {
+       await send({token:device.token,
+         notification:{title:row.kind==='test'?'AutoNex test alert':'AutoNex: nearby repair request',
+           body:row.kind==='test'?'Notifications are reaching this phone.':'A driver nearby needs a mechanic. Open AutoNex to view available requests.'},
+         data:{kind:row.kind,requestId:String(row.repair_request_id||''),eventId:String(row.id)},
+         android:{priority:'high',ttl:Math.max(1000,Math.min(300000,new Date(row.expires_at)-Date.now())),
+           notification:{channelId:'autonex_requests',sound:'default',tag:row.event_key,icon:'ic_notification'}}});
+       await c.query("UPDATE push_outbox SET status='sent',sent_at=CURRENT_TIMESTAMP,attempts=attempts+1,last_error=NULL WHERE id=$1",[row.id]);
+     } catch(e) {
+       // Store only the SDK error code, never a token, credential or provider message.
+       const code = typeof e.code==='string' && /^[a-zA-Z0-9_/-]{1,100}$/.test(e.code) ? e.code : 'push/send-failed';
+       const invalid=['messaging/registration-token-not-registered','messaging/invalid-registration-token'].includes(code);
+       if (invalid) await c.query('DELETE FROM push_devices WHERE installation_id=$1 AND token=$2',[row.installation_id,device.token]);
+       else await c.query(`UPDATE push_outbox SET attempts=attempts+1,last_error=$2,
+         status=CASE WHEN attempts>=4 THEN 'failed' ELSE 'pending' END,
+         next_attempt_at=CURRENT_TIMESTAMP+INTERVAL '30 seconds' WHERE id=$1`,[row.id,code]);
+     }
+     return true;
+   });
+   if (!found) break;
+   processed++;
+ }
+ return processed;
+}

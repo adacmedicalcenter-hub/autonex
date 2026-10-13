@@ -5,6 +5,7 @@ import fs from "node:fs/promises";
 import { createApp } from "../src/app.js";
 import { grantWelcomeCredit } from "../src/services/feeService.js";
 import { expire } from "../src/services/workflowService.js";
+process.env.TZ = "UTC";
 process.env.APP_ENV = "test";
 process.env.ALLOW_TEST_TOPUPS = "true";
 process.env.JWT_SECRET = "test-jwt-secret-with-more-than-32-characters";

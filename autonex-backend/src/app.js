@@ -1,3 +1,4 @@
+import { queueRequestAlerts } from './services/pushService.js';
 import { grantWelcomeCredit } from './services/feeService.js';
 import express from "express";
 import cors from "cors";
@@ -27,7 +28,7 @@ import {
   coordinates,
   publicJourney,
 } from "./services/workflowService.js";
-export function createApp(pool) {
+export function createApp(pool, { pushEnabled = false } = {}) {
   const app = express();
   app.use(cors());
   app.use(helmet());
@@ -134,6 +135,41 @@ export function createApp(pool) {
       throw new WorkflowError("Account suspended", 403);
     return token(u);
   });
+  const installation = req => {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.body.installationId || ''))
+      throw new WorkflowError('Invalid phone installation ID',400);
+    return req.body.installationId;
+  };
+  route('post','/api/notifications/device', async req => {
+    const id=installation(req), token=req.body.token;
+    if (typeof token!=='string' || token.length<20 || token.length>4096 || /\s/.test(token))
+      throw new WorkflowError('Invalid notification token',400);
+    await tx(async c => {
+      await c.query('DELETE FROM push_devices WHERE token=$1 AND installation_id<>$2',[token,id]);
+      await c.query(`INSERT INTO push_devices(installation_id,user_id,token) VALUES($1,$2,$3)
+        ON CONFLICT(installation_id) DO UPDATE SET user_id=EXCLUDED.user_id,token=EXCLUDED.token,updated_at=CURRENT_TIMESTAMP`,[id,req.user.id,token]);
+    });
+    return {registered:true,pushEnabled};
+  },auth);
+  route('delete','/api/notifications/device',async req => {
+    await pool.query('DELETE FROM push_devices WHERE installation_id=$1 AND user_id=$2',[installation(req),req.user.id]);
+    return {removed:true};
+  },auth);
+  route('get','/api/notifications/status',async req => ({pushEnabled,
+    devices:Number((await pool.query('SELECT COUNT(*) AS n FROM push_devices WHERE user_id=$1',[req.user.id])).rows[0].n),
+    lastTest:(await pool.query("SELECT status,attempts,last_error,sent_at FROM push_outbox WHERE user_id=$1 AND kind='test' ORDER BY id DESC LIMIT 1",[req.user.id])).rows[0]||null}),auth);
+  route('post','/api/notifications/test',async req => {
+    if (!pushEnabled) throw new WorkflowError('Firebase sending is not configured on this backend',503);
+    return tx(async c => {
+      // Database bucket limits each account to one test per minute across its phones.
+      const devices=(await c.query('SELECT installation_id FROM push_devices WHERE user_id=$1',[req.user.id])).rows;
+      if (!devices.length) throw new WorkflowError('Enable notifications on this phone first',400);
+      const key='test_'+req.user.id+'_'+Math.floor(Date.now()/60000);
+      for (const d of devices) await c.query(`INSERT INTO push_outbox(event_key,user_id,installation_id,kind,expires_at)
+        VALUES($1,$2,$3,'test',CURRENT_TIMESTAMP+INTERVAL '5 minutes') ON CONFLICT DO NOTHING`,[key,req.user.id,d.installation_id]);
+      return {queued:true};
+    });
+  },auth);
   route(
     "get",
     "/api/wallet",
@@ -217,7 +253,11 @@ export function createApp(pool) {
   route(
     "post",
     "/api/repair-requests",
-    (req) => tx((c) => createRequest(c, req.user.id, req.body)),
+    (req) => tx(async c => {
+      const request = await createRequest(c, req.user.id, req.body);
+      const notificationsQueued = await queueRequestAlerts(c, request);
+      return {...request, notificationsQueued};
+    }),
     auth,
     role("driver")
   );

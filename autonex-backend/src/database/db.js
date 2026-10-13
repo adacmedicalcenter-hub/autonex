@@ -3,9 +3,12 @@ const { Pool } = pkg;
 import dotenv from "dotenv";
 
 dotenv.config();
+// Legacy SQL timestamp columns are interpreted as UTC on every host.
+process.env.TZ = "UTC";
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
+  options: "-c timezone=UTC",
 });
 
 export async function initializeDatabase() {
