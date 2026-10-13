@@ -39,6 +39,13 @@ test('Push routing, authorization and durable queue',async t=> {
  await db.query('UPDATE users SET suspended=TRUE WHERE id=$1',[suspended.userId]);
  await db.query("UPDATE users SET location_updated_at=CURRENT_TIMESTAMP-INTERVAL '25 hours' WHERE id=$1",[stale.userId]);
  let request;
+ await t.test('GPS search returns available mechanics within 5 km even after five minutes',async()=> {
+  await db.query("UPDATE users SET location_updated_at=CURRENT_TIMESTAMP-INTERVAL '6 hours' WHERE id=$1",[near.userId]);
+  const results=await api('GET','/api/mechanics/available?latitude=4.075&longitude=9.675',null,driver);
+  assert.deepEqual(results.map(x=>x.id),[near.userId]);
+  assert.ok(results[0].distance_m<5000);
+  await api('GET','/api/mechanics/available?latitude=oops&longitude=9.675',null,driver,400);
+ });
  await t.test('device routes require authentication and valid IDs',async()=> {
   await api('POST','/api/notifications/device',{installationId:ids[0],token:'fake-token-for-push-test-0'},null,401);
   await api('POST','/api/notifications/device',{installationId:'bad',token:'fake-token-for-push-test-0'},near,400);
@@ -105,7 +112,7 @@ test('Push routing, authorization and durable queue',async t=> {
  await t.test('credentials errors never disclose submitted key content',async()=> {
   assert.equal(await firebaseSender(''),null);
   await assert.rejects(firebaseSender('secret-invalid-json'),/must contain valid JSON/);
-  await assert.rejects(firebaseSender(JSON.stringify({project_id:'wrong',private_key:'secret'})),/AutoNex test project/);
+  await assert.rejects(firebaseSender(JSON.stringify({project_id:'wrong',private_key:'secret'})),/RESQUORA test project/);
  });
  } finally {await new Promise(r=>server.close(r));await db.close();}
 });

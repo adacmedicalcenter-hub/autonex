@@ -5,7 +5,7 @@ export async function firebaseSender(raw = process.env.FIREBASE_SERVICE_ACCOUNT_
  let config;
  try { config = JSON.parse(raw); } catch { throw new Error('FIREBASE_SERVICE_ACCOUNT_JSON must contain valid JSON'); }
  if (config.project_id !== PUSH_PROJECT || !config.private_key || !config.client_email)
-   throw new Error('Firebase credentials must belong to the AutoNex test project');
+   throw new Error('Firebase credentials must belong to the RESQUORA test project');
  const { initializeApp, cert } = await import('firebase-admin/app');
  const { getMessaging } = await import('firebase-admin/messaging');
  const app = initializeApp({ credential: cert(config) }, 'autonex-pilot');
@@ -49,8 +49,8 @@ export async function drainPush(pool, send, limit=20) {
      }
      try {
        await send({token:device.token,
-         notification:{title:row.kind==='test'?'AutoNex test alert':'AutoNex: nearby repair request',
-           body:row.kind==='test'?'Notifications are reaching this phone.':'A driver nearby needs a mechanic. Open AutoNex to view available requests.'},
+         notification:{title:row.kind==='test'?'RESQUORA test alert':'RESQUORA: nearby repair request',
+           body:row.kind==='test'?'Notifications are reaching this phone.':'A driver nearby needs a mechanic. Open RESQUORA to view available requests.'},
          data:{kind:row.kind,requestId:String(row.repair_request_id||''),eventId:String(row.id)},
          android:{priority:'high',ttl:Math.max(1000,Math.min(300000,new Date(row.expires_at)-Date.now())),
            notification:{channelId:'autonex_requests',sound:'default',tag:row.event_key,icon:'ic_notification'}}});

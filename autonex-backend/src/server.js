@@ -18,7 +18,7 @@ const sendPush = await firebaseSender();
 console.log(sendPush ? "Firebase TEST sending configured" : "Firebase sending disabled");
 const app = createApp(pool, {pushEnabled:Boolean(sendPush)});
 const server = app.listen(process.env.PORT || 5000, "0.0.0.0", () =>
-  console.log("AutoNex TEST backend ready")
+  console.log("RESQUORA TEST backend ready")
 );
 let running = false;
 const check = async () => {

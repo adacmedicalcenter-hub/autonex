@@ -178,7 +178,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
           "SELECT *,balance-reserved AS available FROM wallets WHERE user_id=$1",
           [req.user.id]
         )
-      ).rows[0], welcomeCreditGranted: true, welcomeCreditAmount: 10000 }),
+      ).rows[0], welcomeCreditGranted: true, welcomeCreditAmount: Number((await pool.query("SELECT amount FROM welcome_credit_grants WHERE user_id=$1",[req.user.id])).rows[0]?.amount || 0), newAccountWelcomeCreditAmount: 2000 }),
     auth
   );
   route(
@@ -530,7 +530,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
       coordinates({ latitude: lat, longitude: lon });
       let rows = (
         await pool.query(
-          "SELECT id,full_name,locality,specialization,location_latitude,location_longitude,location_updated_at FROM users WHERE user_type='mechanic' AND availability=TRUE AND NOT suspended AND location_updated_at>CURRENT_TIMESTAMP-INTERVAL '5 minutes' AND location_latitude IS NOT NULL LIMIT 500"
+          "SELECT id,full_name,locality,specialization,location_latitude,location_longitude,location_updated_at FROM users WHERE user_type='mechanic' AND availability=TRUE AND NOT suspended AND location_updated_at>CURRENT_TIMESTAMP-INTERVAL '24 hours' AND location_latitude IS NOT NULL LIMIT 500"
         )
       ).rows;
       rows = rows
@@ -550,7 +550,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
               r.locality?.toLowerCase() === req.query.locality.toLowerCase()
           ),
         }));
-      return rows.sort(
+      return rows.filter(r => r.distance_m <= 5000).sort(
         (a, b) =>
           Number(b.local_priority) - Number(a.local_priority) ||
           a.distance_m - b.distance_m

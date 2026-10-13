@@ -26,10 +26,11 @@ export async function getFeeConfig(client) {
 export async function grantWelcomeCredit(c, user) {
   const wallet = (await c.query('SELECT * FROM wallets WHERE user_id=$1 FOR UPDATE',[user])).rows[0];
   if (!wallet) throw new WorkflowError('Wallet not found',404);
-  const grant = await c.query("INSERT INTO welcome_credit_grants(user_id,amount) VALUES($1,10000) ON CONFLICT(user_id) DO NOTHING RETURNING user_id",[user]);
+  const value = 2000; // Pilot grant. Production 1,000 FCFA is a separate release decision.
+  const grant = await c.query("INSERT INTO welcome_credit_grants(user_id,amount) VALUES($1,$2) ON CONFLICT(user_id) DO NOTHING RETURNING user_id",[user,value]);
   if (!grant.rows.length) return false;
-  await c.query('UPDATE wallets SET balance=balance+10000 WHERE user_id=$1',[user]);
-  await c.query("INSERT INTO wallet_transactions(user_id,transaction_type,amount,balance_before,balance_after,source,reference_id,description) VALUES($1,'topup',10000,$2,$3,'welcome_credit',$4,'One-time nonwithdrawable AutoNex welcome credit')",[user,wallet.balance,wallet.balance+10000,'welcome_'+user]);
+  await c.query('UPDATE wallets SET balance=balance+$1 WHERE user_id=$2',[value,user]);
+  await c.query("INSERT INTO wallet_transactions(user_id,transaction_type,amount,balance_before,balance_after,source,reference_id,description) VALUES($1,'topup',$2,$3,$4,'welcome_credit',$5,'One-time nonwithdrawable RESQUORA welcome credit')",[user,value,wallet.balance,wallet.balance+value,'welcome_'+user]);
   return true;
 }
 async function audit(

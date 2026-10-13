@@ -516,16 +516,16 @@ test("PostgreSQL pilot workflow, ledger and authorization", async (t) => {
       const d=await api('POST','/api/auth/register',{user_type:'driver',full_name:'Welcome Driver',phone_number:'+237600000006',password:'StrongTestPassword!'});
       const m=await api('POST','/api/auth/register',{user_type:'mechanic',full_name:'Welcome Mechanic',phone_number:'+237600000007',password:'StrongTestPassword!'});
       for (const u of [d,m]) {
-        assert.equal((await api('GET','/api/wallet',null,u)).balance,10000);
+        assert.equal((await api('GET','/api/wallet',null,u)).balance,2000);
         assert.equal(await grantWelcomeCredit(pool,u.userId),false);
-        assert.equal((await api('GET','/api/wallet',null,u)).balance,10000);
+        assert.equal((await api('GET','/api/wallet',null,u)).balance,2000);
       }
       await api('POST','/api/auth/login',{phone_number:'+237600000006',password:'StrongTestPassword!'});
       const r=await api('POST','/api/repair-requests',requestData,d);
       await api('POST',`/api/repair-requests/${r.id}/quotes`,{},m);
-      assert.equal((await api('GET','/api/wallet',null,d)).balance,10000);
+      assert.equal((await api('GET','/api/wallet',null,d)).balance,2000);
       await api('DELETE',`/api/repair-requests/${r.id}`,null,d);
-      assert.equal((await api('GET','/api/wallet',null,d)).available,10000);
+      assert.equal((await api('GET','/api/wallet',null,d)).available,2000);
       await db.query('UPDATE wallets SET balance=0 WHERE user_id=$1',[d.userId]);
       await api('POST','/api/repair-requests',requestData,d,402);
       assert.equal(await grantWelcomeCredit(pool,d.userId),false);
