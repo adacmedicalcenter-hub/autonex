@@ -1,3 +1,6 @@
+import {audioNote} from './services/audioService.js';
+import {protect,reveal,validateProfile,requireApproved,chatJourney,requestAudience} from './services/profileService.js';
+import {reconcileRequestAlerts} from './services/pushService.js';
 import { queueRequestAlerts } from './services/pushService.js';
 import { grantWelcomeCredit } from './services/feeService.js';
 import express from "express";
@@ -32,7 +35,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
   const app = express();
   app.use(cors());
   app.use(helmet());
-  app.use(express.json({ limit: "100kb" }));
+  app.use(express.json({ limit: "1mb" }));
   const route = (method, path, fn, ...middleware) =>
     app[method](path, ...middleware, async (req, res, next) => {
       try {
@@ -49,7 +52,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
       const u = jwt.verify(t, process.env.JWT_SECRET);
       req.user = (
         await pool.query(
-          "SELECT id,user_type,is_admin,suspended,suspend_until FROM users WHERE id=$1",
+          "SELECT id,user_type,is_admin,suspended,suspend_until,mechanic_review_status FROM users WHERE id=$1",
           [u.userId]
         )
       ).rows[0];
@@ -77,6 +80,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
     req.user.is_admin
       ? next()
       : next(new WorkflowError("Admin access required", 403));
+  const approved = async (req,res,next)=>{try {await requireApproved(pool,req.user.id);next();}catch(e){next(e);}};
   const token = (u) => ({
     token: jwt.sign(
       { userId: u.id, userType: u.user_type },
@@ -149,6 +153,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
       await c.query(`INSERT INTO push_devices(installation_id,user_id,token) VALUES($1,$2,$3)
         ON CONFLICT(installation_id) DO UPDATE SET user_id=EXCLUDED.user_id,token=EXCLUDED.token,updated_at=CURRENT_TIMESTAMP`,[id,req.user.id,token]);
     });
+    await reconcileRequestAlerts(pool,req.user.id);
     return {registered:true,pushEnabled};
   },auth);
   route('delete','/api/notifications/device',async req => {
@@ -156,6 +161,8 @@ export function createApp(pool, { pushEnabled = false } = {}) {
     return {removed:true};
   },auth);
   route('get','/api/notifications/status',async req => ({pushEnabled,
+    eligibility:(await pool.query("SELECT availability,mechanic_review_status,location_updated_at,EXISTS(SELECT 1 FROM push_devices d WHERE d.user_id=users.id) AS phone_registered FROM users WHERE id=$1",[req.user.id])).rows[0],
+    lastRequest:(await pool.query("SELECT repair_request_id,status,attempts,last_error,sent_at FROM push_outbox WHERE user_id=$1 AND kind='request' ORDER BY id DESC LIMIT 1",[req.user.id])).rows[0]||null,
     devices:Number((await pool.query('SELECT COUNT(*) AS n FROM push_devices WHERE user_id=$1',[req.user.id])).rows[0].n),
     lastTest:(await pool.query("SELECT status,attempts,last_error,sent_at FROM push_outbox WHERE user_id=$1 AND kind='test' ORDER BY id DESC LIMIT 1",[req.user.id])).rows[0]||null}),auth);
   route('post','/api/notifications/test',async req => {
@@ -265,13 +272,18 @@ export function createApp(pool, { pushEnabled = false } = {}) {
     "get",
     "/api/repair-requests",
     async (req) => {
+      if(req.user.user_type==='mechanic') await requireApproved(pool,req.user.id);
       const own = req.user.user_type === "driver";
-      return (
+      const rows = (
         await pool.query(
-          "SELECT r.*,u.full_name AS driver_name FROM repair_requests r JOIN users u ON u.id=r.driver_id WHERE ($1::boolean AND r.driver_id=$2) OR (NOT $1::boolean AND r.status='open' AND r.expires_at>CURRENT_TIMESTAMP) ORDER BY r.created_at DESC LIMIT 100",
+          "SELECT r.id,r.driver_id,r.title,r.description,r.vehicle_type,r.location,r.latitude,r.longitude,r.status,r.created_at,r.expires_at,(r.audio_note IS NOT NULL) AS has_audio,u.full_name AS driver_name FROM repair_requests r JOIN users u ON u.id=r.driver_id WHERE ($1::boolean AND r.driver_id=$2) OR (NOT $1::boolean AND r.status='open' AND r.expires_at>CURRENT_TIMESTAMP) ORDER BY r.created_at DESC LIMIT 100",
           [own, req.user.id]
         )
       ).rows;
+      if(own)return rows;
+      const u=(await pool.query('SELECT availability,location_latitude,location_longitude,location_updated_at,is_active FROM users WHERE id=$1',[req.user.id])).rows[0];
+      if(!u.availability||!u.is_active||u.location_latitude==null||u.location_longitude==null||!u.location_updated_at||Date.now()-new Date(u.location_updated_at).getTime()>86400000)return [];
+      return rows.filter(r=>distance(r,{latitude:u.location_latitude,longitude:u.location_longitude})<=5000);
     },
     auth
   );
@@ -279,21 +291,24 @@ export function createApp(pool, { pushEnabled = false } = {}) {
     "get",
     "/api/repair-requests/:id",
     async (req) => {
+      if(req.user.user_type==='mechanic') await requireApproved(pool,req.user.id);
       const r = (
         await pool.query("SELECT * FROM repair_requests WHERE id=$1", [
           req.params.id,
         ])
       ).rows[0];
       if (!r) throw new WorkflowError("Request not found", 404);
+      if(req.user.user_type==='mechanic')await requestAudience(pool,req.user.id,r);
       if (req.user.user_type === "driver" && r.driver_id !== req.user.id)
         throw new WorkflowError("Request access denied", 403);
       const qs = (
         await pool.query(
-          "SELECT q.*,u.full_name AS mechanic_name FROM quotes q JOIN users u ON u.id=q.mechanic_id WHERE repair_request_id=$1 AND ($2::boolean OR mechanic_id=$3)",
+          "SELECT q.id,q.repair_request_id,q.mechanic_id,q.quoted_price,q.estimated_time,q.description,q.status,q.created_at,(q.audio_note IS NOT NULL) AS has_audio,u.full_name AS mechanic_name FROM quotes q JOIN users u ON u.id=q.mechanic_id WHERE repair_request_id=$1 AND ($2::boolean OR mechanic_id=$3)",
           [r.id, r.driver_id === req.user.id, req.user.id]
         )
       ).rows;
-      return { ...r, quotes: qs };
+      const {audio_note,...publicRequest}=r;
+      return { ...publicRequest,has_audio:Boolean(audio_note), quotes: qs };
     },
     auth
   );
@@ -309,7 +324,8 @@ export function createApp(pool, { pushEnabled = false } = {}) {
     "/api/repair-requests/:id/quotes",
     (req) => tx((c) => respond(c, req.user.id, req.params.id, req.body)),
     auth,
-    role("mechanic")
+    role("mechanic"),
+    approved
   );
   route(
     "post",
@@ -317,7 +333,8 @@ export function createApp(pool, { pushEnabled = false } = {}) {
     (req) =>
       tx((c) => respond(c, req.user.id, req.body.repair_request_id, req.body)),
     auth,
-    role("mechanic")
+    role("mechanic"),
+    approved
   );
   route(
     "patch",
@@ -357,7 +374,8 @@ export function createApp(pool, { pushEnabled = false } = {}) {
         return { withdrawn: true };
       }),
     auth,
-    role("mechanic")
+    role("mechanic"),
+    approved
   );
   route(
     "get",
@@ -437,7 +455,8 @@ export function createApp(pool, { pushEnabled = false } = {}) {
     "/api/journeys/:id/location",
     (req) => tx((c) => reportLocation(c, req.user.id, req.params.id, req.body)),
     auth,
-    role("mechanic")
+    role("mechanic"),
+    approved
   );
   route(
     "post",
@@ -445,7 +464,8 @@ export function createApp(pool, { pushEnabled = false } = {}) {
     (req) =>
       tx((c) => verifyArrival(c, req.user.id, req.params.id, req.body.pin)),
     auth,
-    role("mechanic")
+    role("mechanic"),
+    approved
   );
   route(
     "post",
@@ -482,7 +502,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
     async (req) =>
       (
         await pool.query(
-          "SELECT id,full_name,phone_number,user_type,availability,locality,specialization,location_latitude,location_longitude FROM users WHERE id=$1",
+          "SELECT id,full_name,phone_number,user_type,availability,locality,specialization,location_latitude,location_longitude,mechanic_review_status,preferred_language FROM users WHERE id=$1",
           [req.user.id]
         )
       ).rows[0],
@@ -492,8 +512,9 @@ export function createApp(pool, { pushEnabled = false } = {}) {
     "patch",
     "/api/users/profile",
     async (req) => {
+      if(req.body.availability===true && req.user.user_type==='mechanic') await requireApproved(pool,req.user.id);
       if (req.body.latitude != null) coordinates(req.body);
-      return (
+      const result = (
         await pool.query(
           "UPDATE users SET availability=COALESCE($1,availability),locality=COALESCE($2,locality),specialization=COALESCE($3,specialization),location_latitude=COALESCE($4,location_latitude),location_longitude=COALESCE($5,location_longitude),location_updated_at=CASE WHEN $4::numeric IS NULL THEN location_updated_at ELSE CURRENT_TIMESTAMP END WHERE id=$6 RETURNING id,availability,locality,specialization",
           [
@@ -506,21 +527,20 @@ export function createApp(pool, { pushEnabled = false } = {}) {
           ]
         )
       ).rows[0];
+      await reconcileRequestAlerts(pool,req.user.id);
+      return result;
     },
     auth
   );
-  route(
-    "get",
-    "/api/users/:id",
-    async (req) =>
-      (
-        await pool.query(
-          "SELECT id,full_name,user_type,locality,specialization FROM users WHERE id=$1",
-          [req.params.id]
-        )
-      ).rows[0],
-    auth
-  );
+  route('get','/api/users/:id',async req=>{
+    const user=(await pool.query('SELECT id,full_name,user_type,locality,specialization,mechanic_review_status FROM users WHERE id=$1',[req.params.id])).rows[0];
+    if(!user) throw new WorkflowError('User not found',404);
+    const driver=req.user.user_type==='driver'?req.user.id:user.id, mechanic=req.user.user_type==='mechanic'?req.user.id:user.id;
+    let can_message=false;try{await chatJourney(pool,driver,mechanic);can_message=true;}catch(e){if(!(e instanceof WorkflowError))throw e;}
+    const p=user.user_type==='mechanic'&&user.mechanic_review_status==='approved'?(await pool.query('SELECT public_details,portrait,garage_photo FROM mechanic_profiles WHERE user_id=$1',[user.id])).rows[0]:null;
+    const phone=can_message?(await pool.query('SELECT phone_number FROM users WHERE id=$1',[user.id])).rows[0].phone_number:null;
+    return {...user,...(p?.public_details||{}),portrait:p?.portrait,garage_photo:p?.garage_photo,can_message,phone};
+  },auth);
   route(
     "get",
     "/api/mechanics/available",
@@ -530,7 +550,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
       coordinates({ latitude: lat, longitude: lon });
       let rows = (
         await pool.query(
-          "SELECT id,full_name,locality,specialization,location_latitude,location_longitude,location_updated_at FROM users WHERE user_type='mechanic' AND availability=TRUE AND NOT suspended AND location_updated_at>CURRENT_TIMESTAMP-INTERVAL '24 hours' AND location_latitude IS NOT NULL LIMIT 500"
+          "SELECT id,full_name,locality,specialization,location_latitude,location_longitude,location_updated_at FROM users WHERE user_type='mechanic' AND availability=TRUE AND NOT suspended AND is_active=TRUE AND mechanic_review_status='approved' AND location_updated_at>CURRENT_TIMESTAMP-INTERVAL '24 hours' AND location_latitude IS NOT NULL LIMIT 500"
         )
       ).rows;
       rows = rows
@@ -564,7 +584,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
     async (req) =>
       (
         await pool.query(
-          "SELECT s.*,u.full_name AS mechanic_name FROM service_offers s JOIN users u ON u.id=s.mechanic_id WHERE s.is_active=TRUE ORDER BY s.id DESC LIMIT 100"
+          "SELECT s.*,u.full_name AS mechanic_name FROM service_offers s JOIN users u ON u.id=s.mechanic_id WHERE s.is_active=TRUE AND u.mechanic_review_status='approved' AND NOT u.suspended AND u.is_active=TRUE ORDER BY s.id DESC LIMIT 100"
         )
       ).rows,
     auth
@@ -587,7 +607,8 @@ export function createApp(pool, { pushEnabled = false } = {}) {
         )
       ).rows[0],
     auth,
-    role("mechanic")
+    role("mechanic"),
+    approved
   );
   route(
     "delete",
@@ -600,7 +621,8 @@ export function createApp(pool, { pushEnabled = false } = {}) {
       return { deleted: true };
     },
     auth,
-    role("mechanic")
+    role("mechanic"),
+    approved
   );
   route(
     "patch",
@@ -619,87 +641,74 @@ export function createApp(pool, { pushEnabled = false } = {}) {
         )
       ).rows[0],
     auth,
-    role("mechanic")
+    role("mechanic"),
+    approved
   );
-  route(
-    "post",
-    "/api/conversations",
-    async (req) => {
-      const other = (
-        await pool.query("SELECT * FROM users WHERE id=$1", [
-          req.body.other_user_id,
-        ])
-      ).rows[0];
-      if (!other || other.user_type === req.user.user_type)
-        throw new WorkflowError("Choose a driver and mechanic", 400);
-      const driver = req.user.user_type === "driver" ? req.user.id : other.id,
-        mechanic = req.user.user_type === "mechanic" ? req.user.id : other.id;
-      return (
-        await pool.query(
-          "INSERT INTO conversations(driver_id,mechanic_id) VALUES($1,$2) ON CONFLICT(driver_id,mechanic_id) DO UPDATE SET updated_at=CURRENT_TIMESTAMP RETURNING *",
-          [driver, mechanic]
-        )
-      ).rows[0];
-    },
-    auth
-  );
-  route(
-    "get",
-    "/api/conversations",
-    async (req) =>
-      (
-        await pool.query(
-          "SELECT c.*,d.full_name AS driver_name,m.full_name AS mechanic_name FROM conversations c JOIN users d ON d.id=c.driver_id JOIN users m ON m.id=c.mechanic_id WHERE c.driver_id=$1 OR c.mechanic_id=$1 ORDER BY c.updated_at DESC",
-          [req.user.id]
-        )
-      ).rows,
-    auth
-  );
-  async function conversation(id, user) {
-    const c = (
-      await pool.query(
-        "SELECT * FROM conversations WHERE id=$1 AND (driver_id=$2 OR mechanic_id=$2)",
-        [id, user]
-      )
-    ).rows[0];
-    if (!c) throw new WorkflowError("Conversation access denied", 403);
-    return c;
+  route('post','/api/conversations',req=>tx(async c=>{
+    const other=(await c.query('SELECT id,user_type FROM users WHERE id=$1',[req.body.other_user_id])).rows[0];
+    if(!other||other.user_type===req.user.user_type)throw new WorkflowError('Choose a driver and mechanic',400);
+    const driver=req.user.user_type==='driver'?req.user.id:other.id,mechanic=req.user.user_type==='mechanic'?req.user.id:other.id;
+    const j=await chatJourney(c,driver,mechanic);
+    return (await c.query('INSERT INTO conversations(driver_id,mechanic_id,repair_request_id,journey_id) VALUES($1,$2,$3,$4) ON CONFLICT(journey_id) DO UPDATE SET updated_at=CURRENT_TIMESTAMP RETURNING *',[driver,mechanic,j.repair_request_id,j.id])).rows[0];
+  }),auth);
+  route('get','/api/conversations',async req=>(await pool.query("SELECT c.*,d.full_name AS driver_name,m.full_name AS mechanic_name,j.status AS journey_status FROM conversations c JOIN journeys j ON j.id=c.journey_id JOIN users d ON d.id=c.driver_id JOIN users m ON m.id=c.mechanic_id WHERE c.driver_id=$1 OR c.mechanic_id=$1 ORDER BY c.updated_at DESC",[req.user.id])).rows,auth);
+  async function conversation(c,id,user,write=false){
+    const row=(await c.query('SELECT c.*,j.status,j.expires_at FROM conversations c JOIN journeys j ON j.id=c.journey_id WHERE c.id=$1 AND (c.driver_id=$2 OR c.mechanic_id=$2)'+(write?' FOR UPDATE OF j':''),[id,user])).rows[0];
+    if(!row)throw new WorkflowError('Conversation access denied',403);
+    if(write){const j=await chatJourney(c,row.driver_id,row.mechanic_id);if(j.id!==row.journey_id)throw new WorkflowError('Start a conversation for the current journey',403);}
+    return row;
   }
-  route(
-    "get",
-    "/api/conversations/:id/messages",
-    async (req) => {
-      await conversation(req.params.id, req.user.id);
-      return (
-        await pool.query(
-          "SELECT m.*,u.full_name AS sender_name FROM messages m JOIN users u ON u.id=m.sender_id WHERE conversation_id=$1 ORDER BY m.id DESC LIMIT 100",
-          [req.params.id]
-        )
-      ).rows.reverse();
-    },
-    auth
-  );
-  route(
-    "post",
-    "/api/conversations/:id/messages",
-    async (req) => {
-      await conversation(req.params.id, req.user.id);
-      if (!String(req.body.message_text || "").trim())
-        throw new WorkflowError("Message is empty", 400);
-      return (
-        await pool.query(
-          "INSERT INTO messages(conversation_id,sender_id,sender_type,message_text) VALUES($1,$2,$3,$4) RETURNING *",
-          [
-            req.params.id,
-            req.user.id,
-            req.user.user_type,
-            req.body.message_text,
-          ]
-        )
-      ).rows[0];
-    },
-    auth
-  );
+  route('get','/api/conversations/:id',async req=>{const row=await conversation(pool,req.params.id,req.user.id);return {id:row.id,can_send:['active','driver_arrived','mechanic_arrived','both_arrived','service_started','service_completed'].includes(row.status)&&new Date(row.expires_at)>new Date()};},auth);
+  route('get','/api/conversations/:id/messages',async req=>{
+    await conversation(pool,req.params.id,req.user.id);
+    return (await pool.query('SELECT m.id,m.sender_id,m.sender_type,m.message_text,m.created_at,m.audio_duration,(m.audio_note IS NOT NULL) AS has_audio,u.full_name AS sender_name FROM messages m JOIN users u ON u.id=m.sender_id WHERE conversation_id=$1 ORDER BY m.id DESC LIMIT 100',[req.params.id])).rows.reverse();
+  },auth);
+  route('post','/api/conversations/:id/messages',req=>tx(async c=>{
+    await conversation(c,req.params.id,req.user.id,true);
+    const voice=audioNote(req.body);
+    const message=String(req.body.message_text||'').trim();if((!message&&!voice.note)||message.length>2000)throw new WorkflowError('Message must contain 1 to 2000 characters',400);
+    return (await c.query('INSERT INTO messages(conversation_id,sender_id,sender_type,message_text,audio_note,audio_duration) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,conversation_id,sender_id,sender_type,message_text,audio_duration,(audio_note IS NOT NULL) AS has_audio',[req.params.id,req.user.id,req.user.user_type,message,voice.note,voice.duration])).rows[0];
+  }),auth);
+  async function requestAudioAccess(req,id){
+    const r=(await pool.query('SELECT id,driver_id,latitude,longitude FROM repair_requests WHERE id=$1',[id])).rows[0];if(!r)throw new WorkflowError('Request not found',404);
+    if(req.user.user_type==='driver'&&r.driver_id!==req.user.id)throw new WorkflowError('Request access denied',403);
+    if(req.user.user_type==='mechanic')await requestAudience(pool,req.user.id,r);
+  }
+  route('get','/api/repair-requests/:id/audio',async req=>{await requestAudioAccess(req,req.params.id);const row=(await pool.query('SELECT audio_note,audio_duration FROM repair_requests WHERE id=$1',[req.params.id])).rows[0];if(!row.audio_note)throw new WorkflowError('Voice note not found',404);return row;},auth);
+  route('get','/api/quotes/:id/audio',async req=>{const q=(await pool.query('SELECT * FROM quotes WHERE id=$1',[req.params.id])).rows[0];if(!q)throw new WorkflowError('Response not found',404);const r=(await pool.query('SELECT id,driver_id,latitude,longitude FROM repair_requests WHERE id=$1',[q.repair_request_id])).rows[0];if(req.user.id!==q.mechanic_id&&req.user.id!==r.driver_id)throw new WorkflowError('Response access denied',403);if(!q.audio_note)throw new WorkflowError('Voice note not found',404);return {audio_note:q.audio_note,audio_duration:q.audio_duration};},auth);
+  route('get','/api/messages/:id/audio',async req=>{const m=(await pool.query('SELECT * FROM messages WHERE id=$1',[req.params.id])).rows[0];if(!m)throw new WorkflowError('Voice note not found',404);await conversation(pool,m.conversation_id,req.user.id);if(!m.audio_note)throw new WorkflowError('Voice note not found',404);return {audio_note:m.audio_note,audio_duration:m.audio_duration};},auth);
+  route('patch','/api/users/language',async req=>{if(!['en','fr'].includes(req.body.language))throw new WorkflowError('Choose English or French',400);await pool.query('UPDATE users SET preferred_language=$1 WHERE id=$2',[req.body.language,req.user.id]);return {language:req.body.language};},auth);
+  route('get','/api/mechanic-profile',async req=>{
+    const p=(await pool.query('SELECT * FROM mechanic_profiles WHERE user_id=$1',[req.user.id])).rows[0];
+    const u=(await pool.query('SELECT full_name,phone_number,mechanic_review_status FROM users WHERE id=$1',[req.user.id])).rows[0];
+    return {...u,...(p?{...p.public_details,...reveal(p.private_cipher),portrait:p.portrait,garage_photo:p.garage_photo,review_note:p.review_note}: {})};
+  },auth,role('mechanic'));
+  route('put','/api/mechanic-profile',req=>tx(async c=>{
+    await c.query('SELECT id FROM users WHERE id=$1 FOR UPDATE',[req.user.id]);
+    const active=(await c.query("SELECT id FROM journeys WHERE mechanic_id=$1 AND status IN ('active','driver_arrived','mechanic_arrived','both_arrived','service_started','service_completed')",[req.user.id])).rows;
+    if(active.length)throw new WorkflowError('Finish your current journey before submitting profile changes',409);
+    const p=validateProfile(req.body);
+    await c.query("INSERT INTO mechanic_profiles(user_id,public_details,private_cipher,portrait,garage_photo) VALUES($1,$2,$3,$4,$5) ON CONFLICT(user_id) DO UPDATE SET public_details=EXCLUDED.public_details,private_cipher=EXCLUDED.private_cipher,portrait=EXCLUDED.portrait,garage_photo=EXCLUDED.garage_photo,review_note='',submitted_at=CURRENT_TIMESTAMP,reviewed_at=NULL,reviewed_by=NULL",[req.user.id,JSON.stringify(p.publicDetails),protect(p.privateDetails),p.portrait,p.garagePhoto]);
+    await c.query("UPDATE users SET mechanic_review_status='pending',availability=FALSE,full_name=$1,locality=$2,specialization=$3 WHERE id=$4",[p.publicDetails.full_name,p.publicDetails.locality,p.publicDetails.specialization,req.user.id]);
+    return {mechanic_review_status:'pending'};
+  }),auth,role('mechanic'));
+  route('get','/api/admin/mechanic-profiles',async req=>(await pool.query("SELECT u.id,u.full_name,u.phone_number,u.mechanic_review_status,p.public_details,p.submitted_at,p.review_note FROM users u LEFT JOIN mechanic_profiles p ON p.user_id=u.id WHERE u.user_type='mechanic' ORDER BY p.submitted_at DESC NULLS LAST LIMIT 500")).rows,auth,admin);
+  route('get','/api/admin/mechanic-profiles/:id',async req=>{
+    const p=(await pool.query('SELECT * FROM mechanic_profiles WHERE user_id=$1',[req.params.id])).rows[0];if(!p)throw new WorkflowError('Profile not submitted',404);
+    await pool.query("INSERT INTO admin_audit(admin_id,action,details) VALUES($1,'view_mechanic_identity',$2)",[req.user.id,JSON.stringify({userId:Number(req.params.id)})]);
+    return {...p.public_details,...reveal(p.private_cipher),portrait:p.portrait,garage_photo:p.garage_photo,review_note:p.review_note};
+  },auth,admin);
+  route('patch','/api/admin/mechanic-profiles/:id',req=>tx(async c=>{
+    if(!['approved','rejected'].includes(req.body.status))throw new WorkflowError('Choose approved or rejected',400);
+    const note=String(req.body.note||'').trim();if(note.length>1000||req.body.status==='rejected'&&!note)throw new WorkflowError('Give a reason when rejecting a profile',400);
+    await c.query('SELECT id FROM users WHERE id=$1 FOR UPDATE',[req.params.id]);
+    const p=(await c.query('SELECT * FROM mechanic_profiles WHERE user_id=$1 FOR UPDATE',[req.params.id])).rows[0];if(!p)throw new WorkflowError('Profile not submitted',404);
+    if(req.body.status==='approved')validateProfile({...p.public_details,...reveal(p.private_cipher),portrait:p.portrait,garage_photo:p.garage_photo,consent:true});
+    await c.query('UPDATE users SET mechanic_review_status=$1,availability=FALSE WHERE id=$2',[req.body.status,req.params.id]);
+    await c.query('UPDATE mechanic_profiles SET review_note=$1,reviewed_at=CURRENT_TIMESTAMP,reviewed_by=$2 WHERE user_id=$3',[note,req.user.id,req.params.id]);
+    await c.query("INSERT INTO admin_audit(admin_id,action,details) VALUES($1,'review_mechanic_profile',$2)",[req.user.id,JSON.stringify({userId:Number(req.params.id),status:req.body.status})]);return {status:req.body.status};
+  }),auth,admin);
+  route('get','/api/admin/notifications',async req=>(await pool.query('SELECT o.id,o.repair_request_id,o.user_id,o.kind,o.status,o.attempts,o.last_error,o.sent_at FROM push_outbox o ORDER BY o.id DESC LIMIT 100')).rows,auth,admin);
   route(
     "get",
     "/api/admin/analytics/dashboard",

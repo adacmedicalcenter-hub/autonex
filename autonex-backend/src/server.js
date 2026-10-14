@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { firebaseSender, drainPush } from "./services/pushService.js";
+import { firebaseSender, drainPush, reconcileRequestAlerts } from "./services/pushService.js";
 import pool from "./database/db.js";
 import { createApp } from "./app.js";
 import { expire } from "./services/workflowService.js";
@@ -36,7 +36,7 @@ let pushing=false;
 const pushCheck=async()=> {
  if (pushing) return;
  pushing=true;
- try { await drainPush(pool,sendPush); }
+ try { await reconcileRequestAlerts(pool); await drainPush(pool,sendPush); }
  catch { console.error('Push queue worker failed'); }
  finally { pushing=false; }
 };

@@ -57,6 +57,7 @@ test("PostgreSQL pilot workflow, ledger and authorization", async (t) => {
       });
       // Existing fee-workflow fixtures represent accounts that exhausted their welcome credit.
       await db.query("UPDATE wallets SET balance=0 WHERE user_id=$1", [u.userId]);
+      if(role==='mechanic')await db.query("UPDATE users SET mechanic_review_status='approved',availability=TRUE,location_latitude=4.075,location_longitude=9.675,location_updated_at=CURRENT_TIMESTAMP WHERE id=$1",[u.userId]);
       return u;
     };
     const driver = await register("driver", 1),
@@ -515,6 +516,7 @@ test("PostgreSQL pilot workflow, ledger and authorization", async (t) => {
     await t.test("one-time welcome credit, login idempotency, exhaustion and existing-account migration", async () => {
       const d=await api('POST','/api/auth/register',{user_type:'driver',full_name:'Welcome Driver',phone_number:'+237600000006',password:'StrongTestPassword!'});
       const m=await api('POST','/api/auth/register',{user_type:'mechanic',full_name:'Welcome Mechanic',phone_number:'+237600000007',password:'StrongTestPassword!'});
+      await db.query("UPDATE users SET mechanic_review_status='approved',availability=TRUE,location_latitude=4.075,location_longitude=9.675,location_updated_at=CURRENT_TIMESTAMP WHERE id=$1",[m.userId]);
       for (const u of [d,m]) {
         assert.equal((await api('GET','/api/wallet',null,u)).balance,2000);
         assert.equal(await grantWelcomeCredit(pool,u.userId),false);

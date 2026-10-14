@@ -25,6 +25,7 @@ test('Push routing, authorization and durable queue',async t=> {
  try {
  const driver=await reg('driver',1), near=await reg('mechanic',2), far=await reg('mechanic',3), stale=await reg('mechanic',4);
  const unavailable=await reg('mechanic',5), suspended=await reg('mechanic',6);
+ await db.query("UPDATE users SET mechanic_review_status='approved' WHERE user_type='mechanic'");
  const profile={availability:true,latitude:4.075,longitude:9.675};
  for(const [i,user] of [near,far,stale].entries()) {
   await api('PATCH','/api/users/profile',{...profile,latitude:user===far?4.135:4.1},user);

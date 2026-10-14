@@ -1,3 +1,5 @@
+import {audioNote} from './audioService.js';
+import {requireApproved,requestAudience} from './profileService.js';
 import {
   randomInt,
   randomBytes,
@@ -100,6 +102,8 @@ function open(r) {
 }
 export async function createRequest(c, user, data) {
   coordinates(data);
+  const voice=audioNote(data);
+  if(String(data.title||'').length>200 || String(data.description||'').length>4000 || String(data.location||'').length>500)throw new WorkflowError('Request text is too long',400);
   if (!String(data.title || "").trim() || !String(data.location || "").trim())
     throw new WorkflowError("Title and location are required", 400);
   const cfg = await getFeeConfig(c);
@@ -117,13 +121,18 @@ export async function createRequest(c, user, data) {
       ]
     )
   ).rows[0];
+  if(voice.note)await c.query('UPDATE repair_requests SET audio_note=$1,audio_duration=$2 WHERE id=$3',[voice.note,voice.duration,r.id]);
   const reservation = await reserveFee(user, r.id, "connection_fee_driver", cfg.driverFee, c);
   return { ...r, feeReserved: reservation.amount > 0, feeAmount: reservation.amount, freeTrial: reservation.amount === 0 };
 }
 export async function respond(c, user, id, data) {
+  await requireApproved(c,user);
+  const voice=audioNote(data);
+  if(String(data.description||'').length>4000)throw new WorkflowError('Response text is too long',400);
   if (data.quoted_price != null) amount(data.quoted_price);
   const r = await request(c, id);
   open(r);
+  await requestAudience(c,user,r,{newResponse:true});
   if (
     (
       await c.query(
@@ -137,13 +146,13 @@ export async function respond(c, user, id, data) {
   await reserveFee(user, r.id, "connection_fee_mechanic", cfg.mechanicFee, c);
   return (
     await c.query(
-      "INSERT INTO quotes(repair_request_id,mechanic_id,quoted_price,estimated_time,description) VALUES($1,$2,$3,$4,$5) RETURNING *",
+      "INSERT INTO quotes(repair_request_id,mechanic_id,quoted_price,estimated_time,description,audio_note,audio_duration) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *",
       [
         id,
         user,
         data.quoted_price || null,
         data.estimated_time || "",
-        data.description || "",
+        data.description || "", voice.note,voice.duration,
       ]
     )
   ).rows[0];
@@ -163,6 +172,7 @@ export async function select(c, user, quoteId) {
       throw new WorkflowError("A mechanic is already selected");
     return { ...q, journey: publicJourney(old) };
   }
+  await requireApproved(c,q.mechanic_id);
   open(r);
   if (q.status !== "pending")
     throw new WorkflowError("Response no longer available");
@@ -205,6 +215,7 @@ export async function select(c, user, quoteId) {
   await c.query("UPDATE repair_requests SET status='accepted' WHERE id=$1", [
     r.id,
   ]);
+  await c.query('INSERT INTO conversations(driver_id,mechanic_id,repair_request_id,journey_id) VALUES($1,$2,$3,$4) ON CONFLICT(journey_id) DO NOTHING',[user,q.mechanic_id,r.id,j.id]);
   return { ...q, status: "accepted", journey: publicJourney(j) };
 }
 export async function cancelRequest(c, user, id, reason = "Driver cancelled") {

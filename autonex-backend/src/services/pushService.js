@@ -15,7 +15,7 @@ export function pushRadius() { return 5000; }
 export async function queueRequestAlerts(c, request) {
  const devices = (await c.query(`SELECT d.installation_id,d.user_id,u.location_latitude,u.location_longitude
  FROM push_devices d JOIN users u ON u.id=d.user_id
- WHERE u.user_type='mechanic' AND u.availability=TRUE AND NOT u.suspended AND u.is_active=TRUE
+ WHERE u.user_type='mechanic' AND u.availability=TRUE AND NOT u.suspended AND u.is_active=TRUE AND u.mechanic_review_status='approved'
  AND u.location_updated_at>CURRENT_TIMESTAMP-INTERVAL '24 hours'
  AND d.updated_at>CURRENT_TIMESTAMP-INTERVAL '30 days'
  AND u.location_latitude IS NOT NULL AND u.location_longitude IS NOT NULL`)).rows;
@@ -37,21 +37,21 @@ export async function drainPush(pool, send, limit=20) {
      const row = (await c.query(`SELECT * FROM push_outbox WHERE status='pending'
        AND next_attempt_at<=CURRENT_TIMESTAMP ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1`)).rows[0];
      if (!row) return false;
-     const device = (await c.query(`SELECT d.token,u.availability,u.suspended,u.is_active
+     const device = (await c.query(`SELECT d.token,u.availability,u.suspended,u.is_active,u.preferred_language,u.mechanic_review_status
        FROM push_devices d JOIN users u ON u.id=d.user_id
        WHERE d.installation_id=$1 AND d.user_id=$2 AND d.updated_at>CURRENT_TIMESTAMP-INTERVAL '30 days'`,
        [row.installation_id,row.user_id])).rows[0];
      const request = row.repair_request_id ? (await c.query('SELECT status,expires_at FROM repair_requests WHERE id=$1',[row.repair_request_id])).rows[0] : null;
      if (!device || device.suspended || !device.is_active || new Date(row.expires_at)<=new Date() ||
-       (row.kind==='request' && (!device.availability || request?.status!=='open' || new Date(request.expires_at)<=new Date()))) {
+       (row.kind==='request' && (!device.availability || device.mechanic_review_status!=='approved' || request?.status!=='open' || new Date(request.expires_at)<=new Date()))) {
        await c.query("UPDATE push_outbox SET status='skipped' WHERE id=$1",[row.id]);
        return true;
      }
      try {
        await send({token:device.token,
-         notification:{title:row.kind==='test'?'RESQUORA test alert':'RESQUORA: nearby repair request',
-           body:row.kind==='test'?'Notifications are reaching this phone.':'A driver nearby needs a mechanic. Open RESQUORA to view available requests.'},
-         data:{kind:row.kind,requestId:String(row.repair_request_id||''),eventId:String(row.id)},
+         notification:{title:device.preferred_language==='fr'?(row.kind==='test'?'RESQUORA : alerte de test':'RESQUORA : demande de réparation à proximité'):(row.kind==='test'?'RESQUORA test alert':'RESQUORA: nearby repair request'),
+           body:device.preferred_language==='fr'?(row.kind==='test'?'Les notifications arrivent sur ce téléphone.':'Un conducteur à proximité a besoin d’un mécanicien. Ouvrez RESQUORA pour voir les demandes.'):(row.kind==='test'?'Notifications are reaching this phone.':'A driver nearby needs a mechanic. Open RESQUORA to view available requests.')},
+         data:{targetUserId:String(row.user_id),kind:row.kind,requestId:String(row.repair_request_id||''),eventId:String(row.id)},
          android:{priority:'high',ttl:Math.max(1000,Math.min(300000,new Date(row.expires_at)-Date.now())),
            notification:{channelId:'autonex_requests',sound:'default',tag:row.event_key,icon:'ic_notification'}}});
        await c.query("UPDATE push_outbox SET status='sent',sent_at=CURRENT_TIMESTAMP,attempts=attempts+1,last_error=NULL WHERE id=$1",[row.id]);
@@ -70,4 +70,13 @@ export async function drainPush(pool, send, limit=20) {
    processed++;
  }
  return processed;
+}
+
+// Recover open requests when a phone registers or its mechanic becomes available.
+// Reusing event/install keys ensures repeated refreshes do not duplicate alerts.
+export async function reconcileRequestAlerts(pool,userId=null){
+ const eligible=(await pool.query("SELECT id FROM users WHERE user_type='mechanic' AND mechanic_review_status='approved' AND availability=TRUE AND NOT suspended AND is_active=TRUE AND ($1::integer IS NULL OR id=$1)",[userId])).rows;
+ if(!eligible.length)return 0;
+ const requests=(await pool.query("SELECT * FROM repair_requests WHERE status='open' AND expires_at>CURRENT_TIMESTAMP AND created_at>CURRENT_TIMESTAMP-INTERVAL '5 minutes' ORDER BY id DESC LIMIT 100")).rows;
+ let queued=0;for(const r of requests)queued+=await queueRequestAlerts(pool,r);return queued;
 }
