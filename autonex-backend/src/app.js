@@ -1,3 +1,4 @@
+import {manualPayments} from './services/manualPayments.js';
 import {rewardedAds} from './services/rewardedAds.js';
 import {mechanicScores,feedbackRoutes} from './services/mechanicRatings.js';
 import {directConnections} from './services/directConnections.js';
@@ -675,8 +676,8 @@ export function createApp(pool, { pushEnabled = false } = {}) {
     "get",
     "/api/admin/analytics/dashboard",
     async () => {
-      const users = (await pool.query("SELECT COUNT(*)::int AS n FROM users"))
-        .rows[0].n;
+      const users = (await pool.query("SELECT COUNT(*)::int AS n,COUNT(*) FILTER(WHERE user_type='driver' AND NOT is_admin)::int AS drivers,COUNT(*) FILTER(WHERE user_type='mechanic' AND NOT is_admin)::int AS mechanics,COUNT(*) FILTER(WHERE is_admin)::int AS admins FROM users"))
+        .rows[0];
       const journeys = (
         await pool.query(
           "SELECT COUNT(*)::int AS n,COUNT(*) FILTER(WHERE status='completed')::int AS completed FROM journeys"
@@ -688,7 +689,8 @@ export function createApp(pool, { pushEnabled = false } = {}) {
         )
       ).rows[0].n;
       return {
-        totalUsers: users,
+        totalUsers: users.n,
+        totalDrivers: users.drivers, totalMechanics: users.mechanics, totalAdministrators: users.admins,
         totalJourneys: journeys.n,
         completedJourneys: journeys.completed,
         totalCreditsUsed: revenue,
@@ -706,14 +708,16 @@ export function createApp(pool, { pushEnabled = false } = {}) {
   route(
     "get",
     "/api/admin/users",
-    async (req) => ({
-      users: (
-        await pool.query(
-          "SELECT id,full_name,phone_number,user_type,is_admin,suspended,is_active,is_demo,created_at FROM users WHERE (full_name ILIKE $1 OR phone_number ILIKE $1) ORDER BY id DESC LIMIT 100",
-          ["%" + (req.query.search || "") + "%"]
-        )
-      ).rows,
-    }),
+    async req => {
+      const role=String(req.query.role||'');
+      if(!['','driver','mechanic'].includes(role))throw Object.assign(new Error('Invalid account role'),{status:400});
+      const offset=Math.max(0,Math.min(10000000,parseInt(req.query.offset,10)||0));
+      const params=['%'+String(req.query.search||'').slice(0,100)+'%',role];
+      const where="(full_name ILIKE $1 OR phone_number ILIKE $1) AND ($2='' OR (user_type=$2 AND NOT is_admin))";
+      const total=(await pool.query('SELECT COUNT(*)::int AS n FROM users WHERE '+where,params)).rows[0].n;
+      const users=(await pool.query('SELECT id,full_name,phone_number,user_type,is_admin,suspended,is_active,is_demo,created_at FROM users WHERE '+where+' ORDER BY id DESC LIMIT 100 OFFSET $3',[...params,offset])).rows;
+      return {users,total,offset};
+    },
     auth,
     admin
   );
@@ -834,6 +838,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
     admin
   );
   accountFeatures({route,pool,tx,auth,admin});
+  manualPayments({route,pool,tx,auth,admin});
   app.use((req, res) => res.status(404).json({ error: "Endpoint not found" }));
   app.use((e, req, res, next) => {
     const status = e.status || (e.code === "23505" ? 409 : 500);
