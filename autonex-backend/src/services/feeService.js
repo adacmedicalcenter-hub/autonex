@@ -10,83 +10,44 @@ export function amount(value) {
     throw new WorkflowError("Use a positive whole FCFA amount", 400);
   return value;
 }
-export async function getFeeConfig(client) {
-  const { rows } = await client.query(
-    "SELECT config_key,config_value FROM admin_config WHERE config_key IN ('connection_fee_driver','connection_fee_mechanic','environment')"
-  );
-  const cfg = Object.fromEntries(
-    rows.map((r) => [r.config_key, r.config_value])
-  );
-  return {
-    driverFee: amount(Number(cfg.connection_fee_driver)),
-    mechanicFee: amount(Number(cfg.connection_fee_mechanic)),
-    environment: cfg.environment,
-  };
+export async function getFeeConfig() {
+  return {driverFee:10,mechanicFee:10,unit:'credits'};
 }
-export async function grantWelcomeCredit(c, user) {
-  const wallet = (await c.query('SELECT * FROM wallets WHERE user_id=$1 FOR UPDATE',[user])).rows[0];
-  if (!wallet) throw new WorkflowError('Wallet not found',404);
-  const value = 2000; // Pilot grant. Production 1,000 FCFA is a separate release decision.
-  const grant = await c.query("INSERT INTO welcome_credit_grants(user_id,amount) VALUES($1,$2) ON CONFLICT(user_id) DO NOTHING RETURNING user_id",[user,value]);
-  if (!grant.rows.length) return false;
-  await c.query('UPDATE wallets SET balance=balance+$1 WHERE user_id=$2',[value,user]);
-  await c.query("INSERT INTO wallet_transactions(user_id,transaction_type,amount,balance_before,balance_after,source,reference_id,description) VALUES($1,'topup',$2,$3,$4,'welcome_credit',$5,'One-time nonwithdrawable RESQUORA welcome credit')",[user,value,wallet.balance,wallet.balance+value,'welcome_'+user]);
+export async function grantWelcomeCredit(c,user) {
+  await c.query('INSERT INTO connection_credit_accounts(user_id) VALUES($1) ON CONFLICT DO NOTHING',[user]);
+  const w=(await c.query('SELECT * FROM connection_credit_accounts WHERE user_id=$1 FOR UPDATE',[user])).rows[0];
+  const g=await c.query('INSERT INTO connection_credit_grants(user_id) VALUES($1) ON CONFLICT DO NOTHING RETURNING user_id',[user]);
+  if(!g.rows.length)return false;
+  await c.query('UPDATE connection_credit_accounts SET balance=balance+20 WHERE user_id=$1',[user]);
+  await c.query("INSERT INTO connection_credit_transactions(user_id,transaction_type,amount,balance_before,balance_after,source,reference_id,description) VALUES($1,'welcome',20,$2,$3,'signup',$4,'One-time 20 free connection credits')",[user,w.balance,w.balance+20,'welcome_'+user]);
   return true;
 }
-async function audit(
-  c,
-  user,
-  request,
-  journey,
-  operation,
-  type,
-  value,
-  before,
-  after,
-  reason
-) {
-  await c.query(
-    "INSERT INTO fee_log(user_id,journey_id,operation,fee_type,amount,status,reason) VALUES($1,$2,$3,$4,$5,'completed',$6)",
-    [user, journey, operation, type, value, reason]
-  );
-  await c.query(
-    "INSERT INTO wallet_transactions(user_id,transaction_type,amount,balance_before,balance_after,source,reference_id,description) VALUES($1,$2,$3,$4,$5,'connection_fee',$6,$7)",
-    [
-      user,
-      {
-        reserve: "reservation",
-        collect: "fee_collection",
-        release: "reservation_release",
-      }[operation],
-      operation === "collect" ? -value : 0,
-      before,
-      after,
-      String(request),
-      reason,
-    ]
-  );
+async function audit(c,user,request,journey,operation,type,value,before,after,reason,reservationId) {
+  const connection=journey?(await c.query('SELECT connection_reference FROM journeys WHERE id=$1',[journey])).rows[0]?.connection_reference:null;
+  await c.query(`INSERT INTO connection_credit_transactions(user_id,connection_reference,transaction_type,amount,balance_before,balance_after,source,reference_id,description)
+    VALUES($1,$2,$3,$4,$5,$6,'connection',$7,$8)`,[user,connection,{reserve:'reservation',collect:'fee_collection',release:'reservation_release'}[operation],operation==='collect'?-value:0,before,after,operation==='collect'?connection:'hold_'+reservationId,reason]);
 }
 export async function reserveFee(user, request, type, value, c) {
-  amount(value);
+  if(value!==10)throw new WorkflowError('Each connection costs 10 credits',400);
   const wallet = (
-    await c.query("SELECT * FROM wallets WHERE user_id=$1 FOR UPDATE", [user])
+    await c.query("SELECT * FROM connection_credit_accounts WHERE user_id=$1 FOR UPDATE", [user])
   ).rows[0];
   if (!wallet || wallet.balance - wallet.reserved < value)
-    throw new WorkflowError("Insufficient available wallet funds", 402);
+    throw new WorkflowError("Insufficient available connection credits", 402);
   const old = (
     await c.query(
-      "SELECT id FROM reservations WHERE user_id=$1 AND repair_request_id=$2 AND fee_type=$3 AND status IN ('reserved','collected')",
+      "SELECT id FROM connection_credit_reservations WHERE user_id=$1 AND repair_request_id=$2 AND fee_type=$3 AND status IN ('reserved','collected')",
       [user, request, type]
     )
   ).rows[0];
   if (old) throw new WorkflowError("Fee already reserved");
   const r = (
     await c.query(
-      "INSERT INTO reservations(user_id,repair_request_id,reservation_type,fee_type,amount,status) VALUES($1,$2,'connection_fee',$3,$4,'reserved') RETURNING *",
+      "INSERT INTO connection_credit_reservations(user_id,repair_request_id,reservation_type,fee_type,amount,status) VALUES($1,$2,'connection_fee',$3,$4,'reserved') RETURNING *",
       [user, request, type, value]
     )
   ).rows[0];
-  await c.query("UPDATE wallets SET reserved=reserved+$1 WHERE user_id=$2", [
+  await c.query("UPDATE connection_credit_accounts SET reserved=reserved+$1 WHERE user_id=$2", [
     value,
     user,
   ]);
@@ -100,28 +61,29 @@ export async function reserveFee(user, request, type, value, c) {
     value,
     wallet.balance,
     wallet.balance,
-    "Connection fee reserved"
+    "10 connection credits held; not yet charged",
+    r.id
   );
   return r;
 }
 export async function releaseFee(id, reason, c) {
   const r = (
-    await c.query("SELECT * FROM reservations WHERE id=$1 FOR UPDATE", [id])
+    await c.query("SELECT * FROM connection_credit_reservations WHERE id=$1 FOR UPDATE", [id])
   ).rows[0];
   if (!r || r.status !== "reserved") return false;
   const w = (
-    await c.query("SELECT * FROM wallets WHERE user_id=$1 FOR UPDATE", [
+    await c.query("SELECT * FROM connection_credit_accounts WHERE user_id=$1 FOR UPDATE", [
       r.user_id,
     ])
   ).rows[0];
   if (w.reserved < r.amount)
-    throw new WorkflowError("Wallet reservation mismatch");
-  await c.query("UPDATE wallets SET reserved=reserved-$1 WHERE user_id=$2", [
+    throw new WorkflowError("Credit reservation mismatch");
+  await c.query("UPDATE connection_credit_accounts SET reserved=reserved-$1 WHERE user_id=$2", [
     r.amount,
     r.user_id,
   ]);
   await c.query(
-    "UPDATE reservations SET status='released',released_at=CURRENT_TIMESTAMP,release_reason=$1 WHERE id=$2",
+    "UPDATE connection_credit_reservations SET status='released',released_at=CURRENT_TIMESTAMP,release_reason=$1 WHERE id=$2",
     [reason, id]
   );
   await audit(
@@ -134,7 +96,8 @@ export async function releaseFee(id, reason, c) {
     r.amount,
     w.balance,
     w.balance,
-    reason
+    reason,
+    r.id
   );
   return true;
 }
@@ -145,7 +108,7 @@ export async function releaseAllUnreleasedFees(
   exceptUser = null
 ) {
   const { rows } = await c.query(
-    "SELECT id FROM reservations WHERE repair_request_id=$1 AND status='reserved' AND ($2::int IS NULL OR user_id<>$2) ORDER BY user_id,id",
+    "SELECT id FROM connection_credit_reservations WHERE repair_request_id=$1 AND status='reserved' AND ($2::int IS NULL OR user_id<>$2) ORDER BY user_id,id",
     [request, exceptUser]
   );
   for (const r of rows) await releaseFee(r.id, reason, c);
@@ -159,7 +122,7 @@ export async function collectFees(journeyId, driver, mechanic, c) {
     throw new WorkflowError("Verified arrival required");
   const rs = (
     await c.query(
-      "SELECT * FROM reservations WHERE repair_request_id=$1 AND user_id IN ($2,$3) AND status='reserved' ORDER BY user_id FOR UPDATE",
+      "SELECT * FROM connection_credit_reservations WHERE repair_request_id=$1 AND user_id IN ($2,$3) AND status='reserved' ORDER BY user_id FOR UPDATE",
       [j.repair_request_id, driver, mechanic]
     )
   ).rows;
@@ -172,21 +135,21 @@ export async function collectFees(journeyId, driver, mechanic, c) {
       (r) => r.user_id === mechanic && r.fee_type === "connection_fee_mechanic"
     )
   )
-    throw new WorkflowError("Both connection fee reservations are required");
+    throw new WorkflowError("Both connection fee connection_credit_reservations are required");
   for (const r of rs) {
     const w = (
-      await c.query("SELECT * FROM wallets WHERE user_id=$1 FOR UPDATE", [
+      await c.query("SELECT * FROM connection_credit_accounts WHERE user_id=$1 FOR UPDATE", [
         r.user_id,
       ])
     ).rows[0];
     if (w.reserved < r.amount || w.balance < r.amount)
-      throw new WorkflowError("Wallet reservation mismatch");
+      throw new WorkflowError("Credit reservation mismatch");
     await c.query(
-      "UPDATE wallets SET balance=balance-$1,reserved=reserved-$1 WHERE user_id=$2",
+      "UPDATE connection_credit_accounts SET balance=balance-$1,reserved=reserved-$1 WHERE user_id=$2",
       [r.amount, r.user_id]
     );
     await c.query(
-      "UPDATE reservations SET status='collected',collected_at=CURRENT_TIMESTAMP WHERE id=$1",
+      "UPDATE connection_credit_reservations SET status='collected',collected_at=CURRENT_TIMESTAMP WHERE id=$1",
       [r.id]
     );
     await audit(
@@ -199,7 +162,7 @@ export async function collectFees(journeyId, driver, mechanic, c) {
       r.amount,
       w.balance,
       w.balance - r.amount,
-      "Collected after verified mechanic GPS arrival"
+      "10 credits charged after verified mechanic GPS arrival"
     );
   }
   await c.query(

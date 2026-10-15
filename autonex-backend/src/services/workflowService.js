@@ -178,11 +178,11 @@ export async function select(c, user, quoteId) {
     throw new WorkflowError("Response no longer available");
   const rs = (
     await c.query(
-      "SELECT user_id FROM reservations WHERE repair_request_id=$1 AND status='reserved' AND user_id IN ($2,$3)",
+      "SELECT user_id FROM connection_credit_reservations WHERE repair_request_id=$1 AND status='reserved' AND user_id IN ($2,$3)",
       [r.id, user, q.mechanic_id]
     )
   ).rows;
-  if (rs.length !== 2) throw new WorkflowError("Both wallet holds required");
+  if (rs.length !== 2) throw new WorkflowError("Both credit holds required");
   const j = (
     await c.query(
       "INSERT INTO journeys(repair_request_id,driver_id,mechanic_id,destination_latitude,destination_longitude) VALUES($1,$2,$3,$4,$5) RETURNING *",
@@ -201,7 +201,7 @@ export async function select(c, user, quoteId) {
   // retain driver and selected mechanic only
   const others = (
     await c.query(
-      "SELECT id FROM reservations WHERE repair_request_id=$1 AND status='reserved' AND user_id NOT IN ($2,$3) ORDER BY user_id",
+      "SELECT id FROM connection_credit_reservations WHERE repair_request_id=$1 AND status='reserved' AND user_id NOT IN ($2,$3) ORDER BY user_id",
       [r.id, user, q.mechanic_id]
     )
   ).rows;
@@ -209,7 +209,7 @@ export async function select(c, user, quoteId) {
   for (const a of others)
     await releaseFee(a.id, "Another mechanic selected", c);
   await c.query(
-    "UPDATE reservations SET journey_id=$1 WHERE repair_request_id=$2 AND status='reserved'",
+    "UPDATE connection_credit_reservations SET journey_id=$1 WHERE repair_request_id=$2 AND status='reserved'",
     [j.id, r.id]
   );
   await c.query("UPDATE repair_requests SET status='accepted' WHERE id=$1", [

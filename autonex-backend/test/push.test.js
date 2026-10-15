@@ -21,7 +21,7 @@ test('Push routing, authorization and durable queue',async t=> {
   const data=await r.json();assert.equal(r.status,status,JSON.stringify(data));return data;
  };
  const ids=['11111111-1111-4111-8111-111111111111','22222222-2222-4222-8222-222222222222','33333333-3333-4333-8333-333333333333'];
- const reg=async(role,n)=>api('POST','/api/auth/register',{user_type:role,full_name:'Push Tester',phone_number:'+23761111111'+n,password:'PushTestPassword'});
+ const reg=async(role,n)=>api('POST','/api/auth/register',{termsAccepted:true,termsVersion:'2026-10-14',user_type:role,full_name:'Push Tester',phone_number:'+23761111111'+n,password:'PushTestPassword'});
  try {
  const driver=await reg('driver',1), near=await reg('mechanic',2), far=await reg('mechanic',3), stale=await reg('mechanic',4);
  const unavailable=await reg('mechanic',5), suspended=await reg('mechanic',6);

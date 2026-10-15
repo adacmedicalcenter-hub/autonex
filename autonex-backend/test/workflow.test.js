@@ -52,11 +52,11 @@ test("PostgreSQL pilot workflow, ledger and authorization", async (t) => {
   try {
     const register = async (role, n) => {
       const u = await api("POST", "/api/auth/register", {
-        user_type: role, full_name: "Test User " + n,
+        termsAccepted:true,termsVersion:'2026-10-14',user_type: role, full_name: "Test User " + n,
         phone_number: "+23760000000" + n, password: "StrongTestPassword!"
       });
       // Existing fee-workflow fixtures represent accounts that exhausted their welcome credit.
-      await db.query("UPDATE wallets SET balance=0 WHERE user_id=$1", [u.userId]);
+      await db.query("UPDATE connection_credit_accounts SET balance=0 WHERE user_id=$1", [u.userId]);
       if(role==='mechanic')await db.query("UPDATE users SET mechanic_review_status='approved',availability=TRUE,location_latitude=4.075,location_longitude=9.675,location_updated_at=CURRENT_TIMESTAMP WHERE id=$1",[u.userId]);
       return u;
     };
@@ -83,32 +83,16 @@ test("PostgreSQL pilot workflow, ledger and authorization", async (t) => {
         );
       }
     );
-    await t.test(
-      "whole FCFA and acknowledgement; idempotent test topup",
-      async () => {
-        await api(
-          "POST",
-          "/api/wallet/topup",
-          { amount: 1.5, nonwithdrawableAcknowledged: true },
-          driver,
-          400
-        );
-        await api("POST", "/api/wallet/topup", { amount: 10000 }, driver, 400);
-        for (const u of [driver, m1, m2]) {
-          const b = {
-            amount: 10000,
-            transactionId: "test_" + u.userId,
-            nonwithdrawableAcknowledged: true,
-          };
-          await api("POST", "/api/wallet/topup", b, u);
-          await api("POST", "/api/wallet/topup", b, u);
-          assert.equal(
-            (await api("GET", "/api/wallet", null, u)).balance,
-            10000
-          );
-        }
+    await t.test('package validation and duplicate test receipts',async()=>{
+      await api('POST','/api/wallet/topup',{amount:10000},driver,410);
+      await api('POST','/api/credits/purchases/test',{packageId:'invalid',reference:'invalid_ref'},driver,400);
+      for(const u of [driver,m1,m2]){
+        const body={packageId:'professional',reference:'test_receipt_'+u.userId};
+        await api('POST','/api/credits/purchases/test',body,u);
+        await api('POST','/api/credits/purchases/test',body,u);
+        assert.equal((await api('GET','/api/credits',null,u)).balance,60);
       }
-    );
+    });
     await t.test(
       "driver hold at publication; mechanic hold at response",
       async () => {
@@ -135,9 +119,9 @@ test("PostgreSQL pilot workflow, ledger and authorization", async (t) => {
         );
         for (const u of [driver, m1, m2]) {
           const w = await api("GET", "/api/wallet", null, u);
-          assert.equal(w.reserved, 1000);
-          assert.equal(w.balance, 10000);
-          assert.equal(w.available, 9000);
+          assert.equal(w.reserved, 10);
+          assert.equal(w.balance, 60);
+          assert.equal(w.available, 50);
         }
         await api(
           "POST",
@@ -168,7 +152,7 @@ test("PostgreSQL pilot workflow, ledger and authorization", async (t) => {
         assert.equal((await api("GET", "/api/wallet", null, m2)).reserved, 0);
         assert.equal(
           (await api("GET", "/api/wallet", null, m1)).reserved,
-          1000
+          10
         );
         await api(
           "POST",
@@ -268,14 +252,14 @@ test("PostgreSQL pilot workflow, ledger and authorization", async (t) => {
         await api("POST", `/api/journeys/${j.id}/verify-arrival`, { pin }, m1);
         for (const u of [driver, m1]) {
           const w = await api("GET", "/api/wallet", null, u);
-          assert.equal(w.balance, 9000);
+          assert.equal(w.balance, 50);
           assert.equal(w.reserved, 0);
-          assert.equal(w.available, 9000);
+          assert.equal(w.available, 50);
         }
         assert.equal(
           (
             await db.query(
-              "SELECT COUNT(*)::int AS n FROM wallet_transactions WHERE transaction_type='fee_collection'"
+              "SELECT COUNT(*)::int AS n FROM connection_credit_transactions WHERE transaction_type='fee_collection'"
             )
           ).rows[0].n,
           2
@@ -360,8 +344,8 @@ test("PostgreSQL pilot workflow, ledger and authorization", async (t) => {
         process.env.ALLOW_TEST_TOPUPS = "false";
         await api(
           "POST",
-          "/api/wallet/topup",
-          { amount: 10, nonwithdrawableAcknowledged: true },
+          "/api/credits/purchases/test",
+          { packageId:"starter",reference:"gated_receipt" },
           driver,
           403
         );
@@ -411,11 +395,11 @@ test("PostgreSQL pilot workflow, ledger and authorization", async (t) => {
         );
         const held = (
           await db.query(
-            "SELECT amount FROM reservations WHERE repair_request_id=$1 AND user_id=$2 AND status='reserved'",
+            "SELECT amount FROM connection_credit_reservations WHERE repair_request_id=$1 AND user_id=$2 AND status='reserved'",
             [r.id, driver.userId]
           )
         ).rows[0];
-        assert.equal(held.amount, 1000);
+        assert.equal(held.amount, 10);
         await api("DELETE", `/api/repair-requests/${r.id}`, null, driver);
         await db.query(
           "UPDATE admin_config SET config_value='1000' WHERE config_key='connection_fee_driver'"
@@ -481,14 +465,14 @@ test("PostgreSQL pilot workflow, ledger and authorization", async (t) => {
         ]);
         const txId = (
           await db.query(
-            "SELECT id FROM wallet_transactions WHERE user_id=$1 AND transaction_type='fee_collection'",
+            "SELECT id FROM connection_credit_transactions WHERE user_id=$1 AND transaction_type='fee_collection'",
             [driver.userId]
           )
         ).rows[0].id;
         assert.equal(
           (await api("GET", "/api/admin/analytics/dashboard", null, outsider))
-            .totalRevenue,
-          2000
+            .totalCreditsUsed,
+          20
         );
         await api(
           "POST",
@@ -504,52 +488,28 @@ test("PostgreSQL pilot workflow, ledger and authorization", async (t) => {
         );
         assert.equal(
           (await api("GET", "/api/wallet", null, driver)).balance,
-          10000
+          60
         );
         assert.equal(
           (await api("GET", "/api/admin/analytics/dashboard", null, outsider))
-            .totalRevenue,
-          1000
+            .totalCreditsUsed,
+          10
         );
       }
     );
-    await t.test("one-time welcome credit, login idempotency, exhaustion and existing-account migration", async () => {
-      const d=await api('POST','/api/auth/register',{user_type:'driver',full_name:'Welcome Driver',phone_number:'+237600000006',password:'StrongTestPassword!'});
-      const m=await api('POST','/api/auth/register',{user_type:'mechanic',full_name:'Welcome Mechanic',phone_number:'+237600000007',password:'StrongTestPassword!'});
-      await db.query("UPDATE users SET mechanic_review_status='approved',availability=TRUE,location_latitude=4.075,location_longitude=9.675,location_updated_at=CURRENT_TIMESTAMP WHERE id=$1",[m.userId]);
-      for (const u of [d,m]) {
-        assert.equal((await api('GET','/api/wallet',null,u)).balance,2000);
-        assert.equal(await grantWelcomeCredit(pool,u.userId),false);
-        assert.equal((await api('GET','/api/wallet',null,u)).balance,2000);
-      }
-      await api('POST','/api/auth/login',{phone_number:'+237600000006',password:'StrongTestPassword!'});
-      const r=await api('POST','/api/repair-requests',requestData,d);
-      await api('POST',`/api/repair-requests/${r.id}/quotes`,{},m);
-      assert.equal((await api('GET','/api/wallet',null,d)).balance,2000);
-      await api('DELETE',`/api/repair-requests/${r.id}`,null,d);
-      assert.equal((await api('GET','/api/wallet',null,d)).available,2000);
-      await db.query('UPDATE wallets SET balance=0 WHERE user_id=$1',[d.userId]);
-      await api('POST','/api/repair-requests',requestData,d,402);
+    await t.test('20 signup credits once, no money-wallet conversion',async()=>{
+      const d=await api('POST','/api/auth/register',{termsAccepted:true,termsVersion:'2026-10-14',user_type:'driver',full_name:'Welcome Driver',phone_number:'600000006',password:'StrongTestPassword!'});
+      assert.equal((await api('GET','/api/credits',null,d)).balance,20);
       assert.equal(await grantWelcomeCredit(pool,d.userId),false);
-      const legacy=(await db.query("INSERT INTO users(user_type,full_name,phone_number,password_hash) VALUES('driver','Existing account','+237600000008','fixture') RETURNING id")).rows[0];
-      await db.query('INSERT INTO wallets(user_id,balance) VALUES($1,1234)',[legacy.id]);
-      const before=(await api('GET','/api/wallet',null,m)).balance;
-      await db.exec(await fs.readFile(new URL('../migrations/006_welcome_credit.sql',import.meta.url),'utf8'));
-      assert.equal((await api('GET','/api/wallet',null,m)).balance,before);
-      assert.equal((await api('GET','/api/wallet',null,d)).balance,0);
-      const grants=await db.query('SELECT COUNT(*)::int AS n FROM welcome_credit_grants WHERE user_id IN ($1,$2)',[d.userId,m.userId]);
-      assert.equal(grants.rows[0].n,2);
-      assert.equal((await db.query('SELECT balance FROM wallets WHERE user_id=$1',[legacy.id])).rows[0].balance,11234);
-      await db.exec(await fs.readFile(new URL('../migrations/006_welcome_credit.sql',import.meta.url),'utf8'));
-      assert.equal((await db.query('SELECT balance FROM wallets WHERE user_id=$1',[legacy.id])).rows[0].balance,11234);
-      assert.equal((await db.query("SELECT COUNT(*)::int AS n FROM wallet_transactions WHERE user_id=$1 AND source='welcome_credit'",[legacy.id])).rows[0].n,1);
-
+      await api('POST','/api/auth/login',{phone_number:'600000006',password:'StrongTestPassword!'});
+      assert.equal((await api('GET','/api/credits',null,d)).balance,20);
+      assert.equal((await db.query('SELECT balance FROM wallets WHERE user_id=$1',[d.userId])).rows[0].balance,0);
     });
     await t.test("automatic GPS arrival collects once without PIN and rejects premature/unauthorized arrival", async () => {
       await db.query("UPDATE admin_config SET config_value='true' WHERE config_key='automatic_gps_arrival'");
       await db.query("UPDATE admin_config SET config_value='1000' WHERE config_key IN ('connection_fee_driver','connection_fee_mechanic')");
       const d=await register('driver',9), m=await register('mechanic',0);
-      for (const u of [d,m]) await api('POST','/api/wallet/topup',{amount:10000,transactionId:'auto_'+u.userId,nonwithdrawableAcknowledged:true},u);
+      for (const u of [d,m]) await api('POST','/api/credits/purchases/test',{packageId:'professional',reference:'auto_receipt_'+u.userId},u);
       const r=await api('POST','/api/repair-requests',requestData,d);
       const q=await api('POST',`/api/repair-requests/${r.id}/quotes`,{},m);
       const j=(await api('PATCH',`/api/quotes/${q.id}/accept`,{},d)).journey;
@@ -557,15 +517,15 @@ test("PostgreSQL pilot workflow, ledger and authorization", async (t) => {
       await api('POST',`/api/journeys/${j.id}/location`,sample,d,403);
       const early=await api('POST',`/api/journeys/${j.id}/location`,sample,m);
       assert.equal(early.verified,false);
-      assert.equal((await api('GET','/api/wallet',null,d)).balance,10000);
+      assert.equal((await api('GET','/api/wallet',null,d)).balance,60);
       await db.query('DELETE FROM location_tracking WHERE journey_id=$1',[j.id]);
       for(const seconds of [12,6]) await db.query("INSERT INTO location_tracking(user_id,journey_id,latitude,longitude,accuracy,timestamp,sampled_at) VALUES($1,$2,4.075,9.675,10,CURRENT_TIMESTAMP-($3::int*INTERVAL '1 second'),CURRENT_TIMESTAMP-($3::int*INTERVAL '1 second'))",[m.userId,j.id,seconds]);
       const arrived=await api('POST',`/api/journeys/${j.id}/location`,{...sample,timestamp:new Date().toISOString()},m);
       assert.equal(arrived.verified,true);
       assert.equal((await api('GET',`/api/journeys/${j.id}`,null,d)).status,'both_arrived');
-      for(const u of [d,m]) assert.equal((await api('GET','/api/wallet',null,u)).balance,9000);
+      for(const u of [d,m]) assert.equal((await api('GET','/api/wallet',null,u)).balance,50);
       await api('POST',`/api/journeys/${j.id}/location`,{...sample,timestamp:new Date().toISOString()},m,409);
-      for(const u of [d,m]) assert.equal((await api('GET','/api/wallet',null,u)).balance,9000);
+      for(const u of [d,m]) assert.equal((await api('GET','/api/wallet',null,u)).balance,50);
     });
   } finally {
     await new Promise((r) => server.close(r));

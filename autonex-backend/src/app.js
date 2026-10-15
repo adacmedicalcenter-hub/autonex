@@ -1,3 +1,6 @@
+import {accountFeatures} from './services/accountFeatures.js';
+import {createHash,randomBytes} from 'node:crypto';
+import {packages,completePurchase,cameroonPhone} from './services/creditService.js';
 import {audioNote} from './services/audioService.js';
 import {protect,reveal,validateProfile,requireApproved,chatJourney,requestAudience} from './services/profileService.js';
 import {reconcileRequestAlerts} from './services/pushService.js';
@@ -52,11 +55,11 @@ export function createApp(pool, { pushEnabled = false } = {}) {
       const u = jwt.verify(t, process.env.JWT_SECRET);
       req.user = (
         await pool.query(
-          "SELECT id,user_type,is_admin,suspended,suspend_until,mechanic_review_status FROM users WHERE id=$1",
+          "SELECT id,user_type,is_admin,suspended,suspend_until,mechanic_review_status,is_active,auth_version FROM users WHERE id=$1",
           [u.userId]
         )
       ).rows[0];
-      if (!req.user) throw new WorkflowError("Login required", 401);
+      if (!req.user || !req.user.is_active || (u.authVersion||0)!==req.user.auth_version) throw new WorkflowError("Login required", 401);
       if (
         req.user.suspended &&
         (!req.user.suspend_until ||
@@ -83,7 +86,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
   const approved = async (req,res,next)=>{try {await requireApproved(pool,req.user.id);next();}catch(e){next(e);}};
   const token = (u) => ({
     token: jwt.sign(
-      { userId: u.id, userType: u.user_type },
+      { userId: u.id, userType: u.user_type, authVersion:u.auth_version||0 },
       process.env.JWT_SECRET,
       { expiresIn: "24h" }
     ),
@@ -97,7 +100,9 @@ export function createApp(pool, { pushEnabled = false } = {}) {
     environment: process.env.APP_ENV,
   }));
   route("post", "/api/auth/register", async (req) => {
-    const { user_type, full_name, phone_number, password } = req.body;
+    const { user_type, full_name, password } = req.body;
+    const phone_number=cameroonPhone(req.body.phone_number);
+    if(req.body.termsAccepted!==true||req.body.termsVersion!=='2026-10-14')throw new WorkflowError('Accept the driver or mechanic terms before creating an account',400);
     if (
       !["driver", "mechanic"].includes(user_type) ||
       !String(full_name || "").trim() ||
@@ -118,17 +123,19 @@ export function createApp(pool, { pushEnabled = false } = {}) {
       ).rows[0];
       await c.query("INSERT INTO wallets(user_id) VALUES($1)", [u.id]);
       await grantWelcomeCredit(c, u.id);
+      await c.query('INSERT INTO signup_terms_acceptances(user_id,version,role) VALUES($1,$2,$3)',[u.id,req.body.termsVersion,user_type]);
+      if(process.env.APP_ENV==='test')await c.query('UPDATE users SET is_demo=TRUE WHERE id=$1',[u.id]);
       return token(u);
     });
   });
   route("post", "/api/auth/login", async (req) => {
     const u = (
       await pool.query("SELECT * FROM users WHERE phone_number=$1", [
-        req.body.phone_number,
+        cameroonPhone(req.body.phone_number),
       ])
     ).rows[0];
     if (
-      !u ||
+      !u || !u.is_active ||
       !(await bcrypt.compare(String(req.body.password || ""), u.password_hash))
     )
       throw new WorkflowError("Invalid credentials", 401);
@@ -177,85 +184,18 @@ export function createApp(pool, { pushEnabled = false } = {}) {
       return {queued:true};
     });
   },auth);
-  route(
-    "get",
-    "/api/wallet",
-    async (req) => ({ ...( 
-        await pool.query(
-          "SELECT *,balance-reserved AS available FROM wallets WHERE user_id=$1",
-          [req.user.id]
-        )
-      ).rows[0], welcomeCreditGranted: true, welcomeCreditAmount: Number((await pool.query("SELECT amount FROM welcome_credit_grants WHERE user_id=$1",[req.user.id])).rows[0]?.amount || 0), newAccountWelcomeCreditAmount: 2000 }),
-    auth
-  );
-  route(
-    "get",
-    "/api/wallet/transactions",
-    async (req) =>
-      (
-        await pool.query(
-          "SELECT * FROM wallet_transactions WHERE user_id=$1 ORDER BY id DESC LIMIT 100",
-          [req.user.id]
-        )
-      ).rows,
-    auth
-  );
-  route(
-    "post",
-    "/api/wallet/topup",
-    async (req) => {
-      if (
-        process.env.APP_ENV !== "test" ||
-        process.env.ALLOW_TEST_TOPUPS !== "true"
-      )
-        throw new WorkflowError(
-          "Test top-ups are disabled. Provider payments are not configured.",
-          403
-        );
-      if (req.body.nonwithdrawableAcknowledged !== true)
-        throw new WorkflowError(
-          "Acknowledge nonwithdrawable wallet credit before top-up",
-          400
-        );
-      const value = amount(req.body.amount);
-      const reference = req.body.transactionId || randomUUID();
-      if (typeof reference !== "string" || reference.length > 150)
-        throw new WorkflowError("Invalid payment reference", 400);
-      return tx(async (c) => {
-        const w = (
-          await c.query("SELECT * FROM wallets WHERE user_id=$1 FOR UPDATE", [
-            req.user.id,
-          ])
-        ).rows[0];
-        const old = (
-          await c.query("SELECT * FROM payment_receipts WHERE reference=$1", [
-            reference,
-          ])
-        ).rows[0];
-        if (old) {
-          if (old.user_id !== req.user.id || old.amount !== value)
-            throw new WorkflowError("Reference already used");
-          return { wallet: w, simulated: true, duplicate: true };
-        }
-        await c.query(
-          "INSERT INTO payment_receipts(reference,user_id,amount,provider) VALUES($1,$2,$3,'test_deposit')",
-          [reference, req.user.id, value]
-        );
-        const updated = (
-          await c.query(
-            "UPDATE wallets SET balance=balance+$1 WHERE user_id=$2 RETURNING *",
-            [value, req.user.id]
-          )
-        ).rows[0];
-        await c.query(
-          "INSERT INTO wallet_transactions(user_id,transaction_type,amount,balance_before,balance_after,source,reference_id,description) VALUES($1,'topup',$2,$3,$4,'test_deposit',$5,'SIMULATED credit: no Mobile Money payment')",
-          [req.user.id, value, w.balance, updated.balance, reference]
-        );
-        return { wallet: updated, simulated: true };
-      });
-    },
-    auth
-  );
+  const creditBalance=async req=>({...((await pool.query('SELECT *,balance-reserved AS available FROM connection_credit_accounts WHERE user_id=$1',[req.user.id])).rows[0]),unit:'credits',connectionCost:10,welcomeCreditAmount:20,livePaymentsEnabled:false});
+  route('get','/api/credits',creditBalance,auth);
+  route('get','/api/wallet',creditBalance,auth); // Old clients cannot add FCFA funds.
+  const creditHistory=async req=>(await pool.query('SELECT * FROM connection_credit_transactions WHERE user_id=$1 ORDER BY id DESC LIMIT 200',[req.user.id])).rows;
+  route('get','/api/credits/transactions',creditHistory,auth);
+  route('get','/api/wallet/transactions',creditHistory,auth);
+  route('get','/api/credits/packages',async()=>({packages,livePaymentsEnabled:false,testPurchasesEnabled:process.env.APP_ENV==='test'&&process.env.ALLOW_TEST_TOPUPS==='true'}),auth);
+  route('post','/api/wallet/topup',async()=>{throw new WorkflowError('Money wallet top-ups were replaced by connection packages. Update the app.',410);},auth);
+  route('post','/api/credits/purchases/test',req=>{
+    if(process.env.APP_ENV!=='test'||process.env.ALLOW_TEST_TOPUPS!=='true')throw new WorkflowError('Test purchases are disabled',403);
+    return tx(c=>completePurchase(c,req.user.id,req.body.packageId,req.body.reference,'test'));
+  },auth);
   // No public reserve/release/collect endpoints. State transitions own these operations.
   route(
     "post",
@@ -276,7 +216,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
       const own = req.user.user_type === "driver";
       const rows = (
         await pool.query(
-          "SELECT r.id,r.driver_id,r.title,r.description,r.vehicle_type,r.location,r.latitude,r.longitude,r.status,r.created_at,r.expires_at,(r.audio_note IS NOT NULL) AS has_audio,u.full_name AS driver_name FROM repair_requests r JOIN users u ON u.id=r.driver_id WHERE ($1::boolean AND r.driver_id=$2) OR (NOT $1::boolean AND r.status='open' AND r.expires_at>CURRENT_TIMESTAMP) ORDER BY r.created_at DESC LIMIT 100",
+          "SELECT r.id,r.driver_id,r.title,r.description,r.vehicle_type,r.location,r.latitude,r.longitude,r.status,r.created_at,r.expires_at,(r.audio_note IS NOT NULL) AS has_audio,u.full_name AS driver_name FROM repair_requests r JOIN users u ON u.id=r.driver_id WHERE (($1::boolean AND r.driver_id=$2) OR (NOT $1::boolean AND r.status='open' AND r.expires_at>CURRENT_TIMESTAMP)) AND NOT EXISTS(SELECT 1 FROM hidden_task_history h WHERE h.user_id=$2 AND h.kind='request' AND h.task_id=r.id) ORDER BY r.created_at DESC LIMIT 100",
           [own, req.user.id]
         )
       ).rows;
@@ -363,7 +303,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
           throw new WorkflowError("Use journey cancellation after selection");
         const rs = (
           await c.query(
-            "SELECT id FROM reservations WHERE repair_request_id=$1 AND user_id=$2 AND status='reserved'",
+            "SELECT id FROM connection_credit_reservations WHERE repair_request_id=$1 AND user_id=$2 AND status='reserved'",
             [q.repair_request_id, req.user.id]
           )
         ).rows;
@@ -578,6 +518,11 @@ export function createApp(pool, { pushEnabled = false } = {}) {
     },
     auth
   );
+  route('get','/api/service-offers/mine',async req=>(await pool.query('SELECT * FROM service_offers WHERE mechanic_id=$1 AND is_active=TRUE ORDER BY id DESC',[req.user.id])).rows,auth,role('mechanic'));
+  route('get','/api/service-offers/:id',async req=>{
+    const service=(await pool.query('SELECT * FROM service_offers WHERE id=$1 AND mechanic_id=$2 AND is_active=TRUE',[req.params.id,req.user.id])).rows[0];
+    if(!service)throw new WorkflowError('Service not found',404);return service;
+  },auth,role('mechanic'));
   route(
     "get",
     "/api/service-offers",
@@ -595,7 +540,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
     async (req) =>
       (
         await pool.query(
-          "INSERT INTO service_offers(mechanic_id,service_name,description,specialization,hourly_rate,location) VALUES($1,$2,$3,$4,$5,$6) RETURNING *",
+          "INSERT INTO service_offers(mechanic_id,service_name,description,specialization,hourly_rate,location,availability) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *",
           [
             req.user.id,
             req.body.service_name,
@@ -603,6 +548,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
             req.body.specialization,
             null,
             req.body.location,
+            JSON.stringify(req.body.availability ?? null),
           ]
         )
       ).rows[0],
@@ -627,19 +573,25 @@ export function createApp(pool, { pushEnabled = false } = {}) {
   route(
     "patch",
     "/api/service-offers/:id",
-    async (req) =>
-      (
+    async (req) => {
+      const updated = (
         await pool.query(
-          "UPDATE service_offers SET service_name=COALESCE($1,service_name),description=COALESCE($2,description),hourly_rate=$3 WHERE id=$4 AND mechanic_id=$5 RETURNING *",
+          "UPDATE service_offers SET service_name=COALESCE($1,service_name),description=COALESCE($2,description),hourly_rate=$3,specialization=COALESCE($6,specialization),location=COALESCE($7,location),availability=CASE WHEN $8::text IS NULL THEN availability ELSE $8::json END WHERE id=$4 AND mechanic_id=$5 AND is_active=TRUE RETURNING *",
           [
             req.body.service_name ?? null,
             req.body.description ?? null,
             null,
             req.params.id,
             req.user.id,
+            req.body.specialization ?? null,
+            req.body.location ?? null,
+            Object.hasOwn(req.body,"availability") ? JSON.stringify(req.body.availability) : null,
           ]
         )
-      ).rows[0],
+      ).rows[0];
+      if(!updated)throw new WorkflowError("Service not found",404);
+      return updated;
+    },
     auth,
     role("mechanic"),
     approved
@@ -722,14 +674,15 @@ export function createApp(pool, { pushEnabled = false } = {}) {
       ).rows[0];
       const revenue = (
         await pool.query(
-          "SELECT COALESCE(-SUM(amount),0)::int AS n FROM wallet_transactions WHERE transaction_type IN ('fee_collection','refund')"
+          "SELECT COALESCE(-SUM(amount),0)::int AS n FROM connection_credit_transactions WHERE transaction_type IN ('fee_collection','refund')"
         )
       ).rows[0].n;
       return {
         totalUsers: users,
         totalJourneys: journeys.n,
         completedJourneys: journeys.completed,
-        totalRevenue: revenue,
+        totalCreditsUsed: revenue,
+        totalRevenueXaf:Number((await pool.query("SELECT COALESCE(SUM(amount_xaf),0) AS n FROM connection_credit_purchases WHERE status='paid' AND provider<>'test'")).rows[0].n),
         activeRequests: (
           await pool.query(
             "SELECT COUNT(*)::int AS n FROM repair_requests WHERE status='open'"
@@ -746,7 +699,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
     async (req) => ({
       users: (
         await pool.query(
-          "SELECT id,full_name,phone_number,user_type,is_admin,suspended,created_at FROM users WHERE full_name ILIKE $1 ORDER BY id DESC LIMIT 100",
+          "SELECT id,full_name,phone_number,user_type,is_admin,suspended,is_active,is_demo,created_at FROM users WHERE (full_name ILIKE $1 OR phone_number ILIKE $1) ORDER BY id DESC LIMIT 100",
           ["%" + (req.query.search || "") + "%"]
         )
       ).rows,
@@ -762,7 +715,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
         if (Number(req.params.id) === req.user.id)
           throw new WorkflowError("Cannot suspend own admin account");
         await c.query(
-          "UPDATE users SET suspended=TRUE,suspend_reason=$1 WHERE id=$2",
+          "UPDATE users SET suspended=TRUE,suspend_until=NULL,availability=FALSE,suspend_reason=$1 WHERE id=$2",
           [req.body.reason || "Admin suspension", req.params.id]
         );
         await c.query(
@@ -778,26 +731,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
     admin
   );
   route("get", "/api/admin/fees", async () => getFeeConfig(pool), auth, admin);
-  route(
-    "patch",
-    "/api/admin/fees",
-    (req) =>
-      tx(async (c) => {
-        const driverFee = amount(req.body.driverFee),
-          mechanicFee = amount(req.body.mechanicFee);
-        await c.query(
-          "UPDATE admin_config SET config_value=CASE config_key WHEN 'connection_fee_driver' THEN $1 ELSE $2 END WHERE config_key IN ('connection_fee_driver','connection_fee_mechanic')",
-          [String(driverFee), String(mechanicFee)]
-        );
-        await c.query(
-          "INSERT INTO admin_audit(admin_id,action,details) VALUES($1,'fees',$2)",
-          [req.user.id, JSON.stringify({ driverFee, mechanicFee })]
-        );
-        return { driverFee, mechanicFee, environment: "TEST" };
-      }),
-    auth,
-    admin
-  );
+  route('patch','/api/admin/fees',async()=>{throw new WorkflowError('Connection cost is fixed at 10 credits per user',400);},auth,admin);
   route(
     "get",
     "/api/admin/requests",
@@ -828,7 +762,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
     async (req) =>
       (
         await pool.query(
-          "SELECT * FROM wallet_transactions ORDER BY id DESC LIMIT 100"
+          "SELECT * FROM connection_credit_transactions ORDER BY id DESC LIMIT 100"
         )
       ).rows,
     auth,
@@ -844,7 +778,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
           throw new WorkflowError("Refund reason required", 400);
         const t = (
           await c.query(
-            "SELECT * FROM wallet_transactions WHERE id=$1 AND transaction_type='fee_collection' FOR UPDATE",
+            "SELECT * FROM connection_credit_transactions WHERE id=$1 AND transaction_type='fee_collection' FOR UPDATE",
             [req.body.transactionId]
           )
         ).rows[0];
@@ -853,23 +787,23 @@ export function createApp(pool, { pushEnabled = false } = {}) {
         if (
           (
             await c.query(
-              "SELECT id FROM wallet_transactions WHERE transaction_type='refund' AND reference_id=$1",
+              "SELECT id FROM connection_credit_transactions WHERE transaction_type='refund' AND reference_id=$1",
               [ref]
             )
           ).rows.length
         )
           return { alreadyRefunded: true };
         const w = (
-          await c.query("SELECT * FROM wallets WHERE user_id=$1 FOR UPDATE", [
+          await c.query("SELECT * FROM connection_credit_accounts WHERE user_id=$1 FOR UPDATE", [
             t.user_id,
           ])
         ).rows[0];
         await c.query(
-          "UPDATE wallets SET balance=balance+$1 WHERE user_id=$2",
+          "UPDATE connection_credit_accounts SET balance=balance+$1 WHERE user_id=$2",
           [-t.amount, t.user_id]
         );
         await c.query(
-          "INSERT INTO wallet_transactions(user_id,transaction_type,amount,balance_before,balance_after,source,reference_id,description) VALUES($1,'refund',$2,$3,$4,'fee_refund',$5,$6)",
+          "INSERT INTO connection_credit_transactions(user_id,transaction_type,amount,balance_before,balance_after,source,reference_id,description,connection_reference) VALUES($1,'refund',$2,$3,$4,'fee_refund',$5,$6,$7)",
           [
             t.user_id,
             -t.amount,
@@ -877,6 +811,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
             w.balance - t.amount,
             ref,
             req.body.reason,
+            t.connection_reference,
           ]
         );
         await c.query(
@@ -888,6 +823,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
     auth,
     admin
   );
+  accountFeatures({route,pool,tx,auth,admin});
   app.use((req, res) => res.status(404).json({ error: "Endpoint not found" }));
   app.use((e, req, res, next) => {
     const status = e.status || (e.code === "23505" ? 409 : 500);
