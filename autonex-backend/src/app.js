@@ -1,3 +1,6 @@
+import {rewardedAds} from './services/rewardedAds.js';
+import {mechanicScores,feedbackRoutes} from './services/mechanicRatings.js';
+import {directConnections} from './services/directConnections.js';
 import {accountFeatures} from './services/accountFeatures.js';
 import {createHash,randomBytes} from 'node:crypto';
 import {packages,completePurchase,cameroonPhone} from './services/creditService.js';
@@ -102,7 +105,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
   route("post", "/api/auth/register", async (req) => {
     const { user_type, full_name, password } = req.body;
     const phone_number=cameroonPhone(req.body.phone_number);
-    if(req.body.termsAccepted!==true||req.body.termsVersion!=='2026-10-14')throw new WorkflowError('Accept the driver or mechanic terms before creating an account',400);
+    if(req.body.termsAccepted!==true||req.body.termsVersion!=='2026-10-15')throw new WorkflowError('Accept the driver or mechanic terms before creating an account',400);
     if (
       !["driver", "mechanic"].includes(user_type) ||
       !String(full_name || "").trim() ||
@@ -197,6 +200,10 @@ export function createApp(pool, { pushEnabled = false } = {}) {
     return tx(c=>completePurchase(c,req.user.id,req.body.packageId,req.body.reference,'test'));
   },auth);
   // No public reserve/release/collect endpoints. State transitions own these operations.
+  directConnections({route,auth,role,tx,queueRequestAlerts});
+  feedbackRoutes({route,auth,role,tx,pool});
+  rewardedAds({route,auth,tx,pool});
+  route('get','/api/admin/feedback',async()=>(await pool.query('SELECT f.*,d.full_name AS driver_name,m.full_name AS mechanic_name FROM verified_mechanic_feedback f JOIN users d ON d.id=f.driver_id JOIN users m ON m.id=f.mechanic_id ORDER BY f.created_at DESC LIMIT 100')).rows,auth,admin);
   route(
     "post",
     "/api/repair-requests",
@@ -216,14 +223,14 @@ export function createApp(pool, { pushEnabled = false } = {}) {
       const own = req.user.user_type === "driver";
       const rows = (
         await pool.query(
-          "SELECT r.id,r.driver_id,r.title,r.description,r.vehicle_type,r.location,r.latitude,r.longitude,r.status,r.created_at,r.expires_at,(r.audio_note IS NOT NULL) AS has_audio,u.full_name AS driver_name FROM repair_requests r JOIN users u ON u.id=r.driver_id WHERE (($1::boolean AND r.driver_id=$2) OR (NOT $1::boolean AND r.status='open' AND r.expires_at>CURRENT_TIMESTAMP)) AND NOT EXISTS(SELECT 1 FROM hidden_task_history h WHERE h.user_id=$2 AND h.kind='request' AND h.task_id=r.id) ORDER BY r.created_at DESC LIMIT 100",
+          "SELECT r.id,r.driver_id,r.title,r.description,r.vehicle_type,r.location,r.latitude,r.longitude,r.status,r.created_at,r.expires_at,r.target_mechanic_id,r.connection_stage,r.search_radius_m,(r.audio_note IS NOT NULL) AS has_audio,u.full_name AS driver_name FROM repair_requests r JOIN users u ON u.id=r.driver_id WHERE (($1::boolean AND r.driver_id=$2) OR (NOT $1::boolean AND r.status='open' AND r.expires_at>CURRENT_TIMESTAMP AND (r.target_mechanic_id IS NULL OR (r.target_mechanic_id=$2 AND r.connection_stage NOT IN ('searching','connected'))))) AND NOT EXISTS(SELECT 1 FROM hidden_task_history h WHERE h.user_id=$2 AND h.kind='request' AND h.task_id=r.id) ORDER BY r.created_at DESC LIMIT 100",
           [own, req.user.id]
         )
       ).rows;
       if(own)return rows;
       const u=(await pool.query('SELECT availability,location_latitude,location_longitude,location_updated_at,is_active FROM users WHERE id=$1',[req.user.id])).rows[0];
       if(!u.availability||!u.is_active||u.location_latitude==null||u.location_longitude==null||!u.location_updated_at||Date.now()-new Date(u.location_updated_at).getTime()>86400000)return [];
-      return rows.filter(r=>distance(r,{latitude:u.location_latitude,longitude:u.location_longitude})<=5000);
+      return rows.filter(r=>distance(r,{latitude:u.location_latitude,longitude:u.location_longitude})<=(r.target_mechanic_id?r.search_radius_m:5000));
     },
     auth
   );
@@ -243,7 +250,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
         throw new WorkflowError("Request access denied", 403);
       const qs = (
         await pool.query(
-          "SELECT q.id,q.repair_request_id,q.mechanic_id,q.quoted_price,q.estimated_time,q.description,q.status,q.created_at,(q.audio_note IS NOT NULL) AS has_audio,u.full_name AS mechanic_name FROM quotes q JOIN users u ON u.id=q.mechanic_id WHERE repair_request_id=$1 AND ($2::boolean OR mechanic_id=$3)",
+          "SELECT q.id,q.repair_request_id,q.mechanic_id,q.quoted_price,q.displacement_fee_xaf,q.estimated_time,q.description,q.status,q.created_at,(q.audio_note IS NOT NULL) AS has_audio,u.full_name AS mechanic_name FROM quotes q JOIN users u ON u.id=q.mechanic_id WHERE repair_request_id=$1 AND ($2::boolean OR mechanic_id=$3)",
           [r.id, r.driver_id === req.user.id, req.user.id]
         )
       ).rows;
@@ -311,6 +318,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
         await c.query("UPDATE quotes SET status='rejected' WHERE id=$1", [
           q.id,
         ]);
+        await c.query("UPDATE repair_requests SET connection_stage='searching' WHERE id=$1 AND target_mechanic_id=$2 AND connection_stage='offered' AND status='open'",[q.repair_request_id,req.user.id]);
         return { withdrawn: true };
       }),
     auth,
@@ -420,7 +428,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
     (req) =>
       tx(async (c) => {
         const j = await journey(c, req.params.id, req.user.id);
-        if (!j.both_fees_collected)
+        if (!j.both_fees_collected || !['both_arrived','completed'].includes(j.status))
           throw new WorkflowError(
             "Verified arrival required before completion"
           );
@@ -479,6 +487,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
     let can_message=false;try{await chatJourney(pool,driver,mechanic);can_message=true;}catch(e){if(!(e instanceof WorkflowError))throw e;}
     const p=user.user_type==='mechanic'&&user.mechanic_review_status==='approved'?(await pool.query('SELECT public_details,portrait,garage_photo FROM mechanic_profiles WHERE user_id=$1',[user.id])).rows[0]:null;
     const phone=can_message?(await pool.query('SELECT phone_number FROM users WHERE id=$1',[user.id])).rows[0].phone_number:null;
+    if(user.user_type==='mechanic'&&!can_message)return {id:user.id,full_name:user.full_name,user_type:user.user_type,specialization:user.specialization,mechanic_review_status:user.mechanic_review_status,years_experience:p?.public_details?.years_experience,...((await mechanicScores(pool))[user.id]||{customer_rating:null,review_count:0,priority_score:3.6}),can_message:false,phone:null};
     return {...user,...(p?.public_details||{}),portrait:p?.portrait,garage_photo:p?.garage_photo,can_message,phone};
   },auth);
   route(
@@ -490,7 +499,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
       coordinates({ latitude: lat, longitude: lon });
       let rows = (
         await pool.query(
-          "SELECT id,full_name,locality,specialization,location_latitude,location_longitude,location_updated_at FROM users WHERE user_type='mechanic' AND availability=TRUE AND NOT suspended AND is_active=TRUE AND mechanic_review_status='approved' AND location_updated_at>CURRENT_TIMESTAMP-INTERVAL '24 hours' AND location_latitude IS NOT NULL LIMIT 500"
+          "SELECT id,full_name,locality,specialization,location_latitude,location_longitude,location_updated_at,(SELECT public_details->>'years_experience' FROM mechanic_profiles WHERE user_id=users.id) AS years_experience FROM users WHERE user_type='mechanic' AND availability=TRUE AND NOT suspended AND is_active=TRUE AND mechanic_review_status='approved' AND location_updated_at>CURRENT_TIMESTAMP-INTERVAL '24 hours' AND location_latitude IS NOT NULL LIMIT 500"
         )
       ).rows;
       rows = rows
@@ -510,10 +519,11 @@ export function createApp(pool, { pushEnabled = false } = {}) {
               r.locality?.toLowerCase() === req.query.locality.toLowerCase()
           ),
         }));
-      return rows.filter(r => r.distance_m <= 5000).sort(
+      const scores=await mechanicScores(pool);
+      const radius=Number(req.query.radius||5000);if(![5000,10000,20000,50000].includes(radius))throw new WorkflowError('Unsupported search radius',400);
+      return rows.filter(r => r.distance_m <= radius).map(({id,full_name,specialization,years_experience,distance_m,local_priority})=>({id,full_name,specialization,years_experience,distance_m:Math.round(distance_m/100)*100,local_priority,...(scores[id]||{customer_rating:null,review_count:0,response_acceptance_percent:null,response_count:0,priority_score:3.6})})).sort(
         (a, b) =>
-          Number(b.local_priority) - Number(a.local_priority) ||
-          a.distance_m - b.distance_m
+          Math.floor(a.distance_m/5000)-Math.floor(b.distance_m/5000) || b.priority_score-a.priority_score || a.distance_m-b.distance_m
       );
     },
     auth
@@ -529,7 +539,7 @@ export function createApp(pool, { pushEnabled = false } = {}) {
     async (req) =>
       (
         await pool.query(
-          "SELECT s.*,u.full_name AS mechanic_name FROM service_offers s JOIN users u ON u.id=s.mechanic_id WHERE s.is_active=TRUE AND u.mechanic_review_status='approved' AND NOT u.suspended AND u.is_active=TRUE ORDER BY s.id DESC LIMIT 100"
+          "SELECT s.id,s.mechanic_id,u.full_name AS mechanic_name,u.specialization FROM service_offers s JOIN users u ON u.id=s.mechanic_id WHERE s.is_active=TRUE AND u.mechanic_review_status='approved' AND NOT u.suspended AND u.is_active=TRUE ORDER BY s.id DESC LIMIT 100"
         )
       ).rows,
     auth
@@ -622,12 +632,12 @@ export function createApp(pool, { pushEnabled = false } = {}) {
     return (await c.query('INSERT INTO messages(conversation_id,sender_id,sender_type,message_text,audio_note,audio_duration) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,conversation_id,sender_id,sender_type,message_text,audio_duration,(audio_note IS NOT NULL) AS has_audio',[req.params.id,req.user.id,req.user.user_type,message,voice.note,voice.duration])).rows[0];
   }),auth);
   async function requestAudioAccess(req,id){
-    const r=(await pool.query('SELECT id,driver_id,latitude,longitude FROM repair_requests WHERE id=$1',[id])).rows[0];if(!r)throw new WorkflowError('Request not found',404);
+    const r=(await pool.query('SELECT id,driver_id,latitude,longitude,target_mechanic_id,connection_stage,search_radius_m FROM repair_requests WHERE id=$1',[id])).rows[0];if(!r)throw new WorkflowError('Request not found',404);
     if(req.user.user_type==='driver'&&r.driver_id!==req.user.id)throw new WorkflowError('Request access denied',403);
     if(req.user.user_type==='mechanic')await requestAudience(pool,req.user.id,r);
   }
   route('get','/api/repair-requests/:id/audio',async req=>{await requestAudioAccess(req,req.params.id);const row=(await pool.query('SELECT audio_note,audio_duration FROM repair_requests WHERE id=$1',[req.params.id])).rows[0];if(!row.audio_note)throw new WorkflowError('Voice note not found',404);return row;},auth);
-  route('get','/api/quotes/:id/audio',async req=>{const q=(await pool.query('SELECT * FROM quotes WHERE id=$1',[req.params.id])).rows[0];if(!q)throw new WorkflowError('Response not found',404);const r=(await pool.query('SELECT id,driver_id,latitude,longitude FROM repair_requests WHERE id=$1',[q.repair_request_id])).rows[0];if(req.user.id!==q.mechanic_id&&req.user.id!==r.driver_id)throw new WorkflowError('Response access denied',403);if(!q.audio_note)throw new WorkflowError('Voice note not found',404);return {audio_note:q.audio_note,audio_duration:q.audio_duration};},auth);
+  route('get','/api/quotes/:id/audio',async req=>{const q=(await pool.query('SELECT * FROM quotes WHERE id=$1',[req.params.id])).rows[0];if(!q)throw new WorkflowError('Response not found',404);const r=(await pool.query('SELECT id,driver_id,latitude,longitude,target_mechanic_id,connection_stage,search_radius_m FROM repair_requests WHERE id=$1',[q.repair_request_id])).rows[0];if(req.user.id!==q.mechanic_id&&req.user.id!==r.driver_id)throw new WorkflowError('Response access denied',403);if(!q.audio_note)throw new WorkflowError('Voice note not found',404);return {audio_note:q.audio_note,audio_duration:q.audio_duration};},auth);
   route('get','/api/messages/:id/audio',async req=>{const m=(await pool.query('SELECT * FROM messages WHERE id=$1',[req.params.id])).rows[0];if(!m)throw new WorkflowError('Voice note not found',404);await conversation(pool,m.conversation_id,req.user.id);if(!m.audio_note)throw new WorkflowError('Voice note not found',404);return {audio_note:m.audio_note,audio_duration:m.audio_duration};},auth);
   route('patch','/api/users/language',async req=>{if(!['en','fr'].includes(req.body.language))throw new WorkflowError('Choose English or French',400);await pool.query('UPDATE users SET preferred_language=$1 WHERE id=$2',[req.body.language,req.user.id]);return {language:req.body.language};},auth);
   route('get','/api/mechanic-profile',async req=>{

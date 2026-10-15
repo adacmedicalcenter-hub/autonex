@@ -133,6 +133,11 @@ export async function respond(c, user, id, data) {
   const r = await request(c, id);
   open(r);
   await requestAudience(c,user,r,{newResponse:true});
+  if(r.target_mechanic_id){
+    if(r.connection_stage!=='offer')throw new WorkflowError('Wait for the driver problem description',409);
+    if(data.description||data.audio_note||data.quoted_price!=null||data.estimated_time)throw new WorkflowError('Only a displacement fee is allowed before approval',400);
+    if(!Number.isSafeInteger(data.displacement_fee_xaf)||data.displacement_fee_xaf<0||data.displacement_fee_xaf>2147483647)throw new WorkflowError('Enter a nonnegative whole XAF displacement fee',400);
+  }
   if (
     (
       await c.query(
@@ -144,7 +149,7 @@ export async function respond(c, user, id, data) {
     throw new WorkflowError("Response already submitted");
   const cfg = await getFeeConfig(c);
   await reserveFee(user, r.id, "connection_fee_mechanic", cfg.mechanicFee, c);
-  return (
+  const response=(
     await c.query(
       "INSERT INTO quotes(repair_request_id,mechanic_id,quoted_price,estimated_time,description,audio_note,audio_duration) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *",
       [
@@ -156,6 +161,8 @@ export async function respond(c, user, id, data) {
       ]
     )
   ).rows[0];
+  if(r.target_mechanic_id){await c.query('UPDATE quotes SET displacement_fee_xaf=$1 WHERE id=$2',[data.displacement_fee_xaf,response.id]);await c.query("UPDATE repair_requests SET connection_stage='offered' WHERE id=$1",[r.id]);response.displacement_fee_xaf=data.displacement_fee_xaf;}
+  return response;
 }
 export async function select(c, user, quoteId) {
   const q = (await c.query("SELECT * FROM quotes WHERE id=$1", [quoteId]))
@@ -174,6 +181,7 @@ export async function select(c, user, quoteId) {
   }
   await requireApproved(c,q.mechanic_id);
   open(r);
+  if(r.target_mechanic_id && (r.target_mechanic_id!==q.mechanic_id || r.connection_stage!=='offered'))throw new WorkflowError('Displacement offer is no longer current',409);
   if (q.status !== "pending")
     throw new WorkflowError("Response no longer available");
   const rs = (
@@ -215,6 +223,7 @@ export async function select(c, user, quoteId) {
   await c.query("UPDATE repair_requests SET status='accepted' WHERE id=$1", [
     r.id,
   ]);
+  if(r.target_mechanic_id){await collectFees(j.id,user,q.mechanic_id,c,'10 credits charged when driver approved displacement fee');await c.query("UPDATE repair_requests SET connection_stage='connected' WHERE id=$1",[r.id]);j.both_fees_collected=true;j.connection_fee_collected=true;}
   await c.query('INSERT INTO conversations(driver_id,mechanic_id,repair_request_id,journey_id) VALUES($1,$2,$3,$4) ON CONFLICT(journey_id) DO NOTHING',[user,q.mechanic_id,r.id,j.id]);
   return { ...q, status: "accepted", journey: publicJourney(j) };
 }
@@ -233,6 +242,7 @@ export async function cancelRequest(c, user, id, reason = "Driver cancelled") {
       "Arrival fee already collected; contact support for refund"
     );
   if (r.status === "cancelled" || r.status === "expired") return r;
+  if(r.target_mechanic_id){const {queueAlertStop}=await import('./pushService.js');await queueAlertStop(c,r.id,r.target_mechanic_id,r.direct_attempt);}
   await releaseAllUnreleasedFees(id, reason, c);
   await c.query("UPDATE repair_requests SET status='cancelled' WHERE id=$1", [
     id,
@@ -250,8 +260,7 @@ export async function cancelRequest(c, user, id, reason = "Driver cancelled") {
 }
 export async function cancelJourney(c, user, id, reason = "Journey cancelled") {
   const j = await journey(c, id, user);
-  if (j.both_fees_collected)
-    throw new WorkflowError("Fees already collected; contact support");
+  if (j.both_fees_collected) {const r=(await c.query('SELECT connection_stage FROM repair_requests WHERE id=$1',[j.repair_request_id])).rows[0];if(r.connection_stage!=='connected')throw new WorkflowError('Fees already collected; contact support');}
   if (["cancelled", "expired"].includes(j.status)) return { status: j.status };
   await releaseAllUnreleasedFees(j.repair_request_id, reason, c);
   await c.query(
@@ -304,7 +313,7 @@ export async function verifyArrival(c, user, id, pin, automatic = false) {
   const j = await journey(c, id, user);
   if (j.mechanic_id !== user)
     throw new WorkflowError("Selected mechanic must verify arrival", 403);
-  if (j.both_fees_collected) return { verified: true, alreadyCollected: true };
+  if (j.both_fees_collected && j.status==='both_arrived') return { verified: true, alreadyCollected: true };
   if (j.status !== "active" || new Date(j.expires_at) <= new Date())
     throw new WorkflowError("Journey is closed or expired");
   const cfg = Object.fromEntries(
@@ -411,12 +420,13 @@ export async function expire(pool) {
           [r.id]
         )
       ).rows[0];
-      if (j?.both_fees_collected) return;
+      if (j?.both_fees_collected && req.connection_stage!=='connected') return;
       if (
         !(req.status === "open" && new Date(req.expires_at) <= new Date()) &&
         !(j?.status === "active" && new Date(j.expires_at) <= new Date())
       )
         return;
+      if(req.target_mechanic_id){const {queueAlertStop}=await import('./pushService.js');await queueAlertStop(c,req.id,req.target_mechanic_id,req.direct_attempt);}
       await releaseAllUnreleasedFees(req.id, "Request or journey expired", c);
       await c.query("UPDATE repair_requests SET status='expired' WHERE id=$1", [
         req.id,

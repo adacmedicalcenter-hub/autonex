@@ -21,13 +21,19 @@ export async function queueRequestAlerts(c, request) {
  AND u.location_latitude IS NOT NULL AND u.location_longitude IS NOT NULL`)).rows;
  let queued = 0;
  for (const d of devices) {
-   if (distance(request, {latitude:d.location_latitude,longitude:d.location_longitude}) > pushRadius()) continue;
-   const inserted = await c.query(`INSERT INTO push_outbox(event_key,user_id,installation_id,repair_request_id,kind,expires_at)
-   VALUES($1,$2,$3,$4,'request',$5) ON CONFLICT DO NOTHING RETURNING id`,
-   ['request_'+request.id,d.user_id,d.installation_id,request.id,request.expires_at]);
+   if(request.target_mechanic_id && (d.user_id!==request.target_mechanic_id || !['ping','offer'].includes(request.connection_stage)))continue;
+   if (distance(request, {latitude:d.location_latitude,longitude:d.location_longitude}) > (request.target_mechanic_id?request.search_radius_m:pushRadius())) continue;
+   const inserted = await c.query(`INSERT INTO push_outbox(event_key,user_id,installation_id,repair_request_id,kind,expires_at,alert_action)
+   VALUES($1,$2,$3,$4,'request',$5,$6) ON CONFLICT DO NOTHING RETURNING id`,
+   ['request_'+request.id+'_'+(request.connection_stage||'broadcast')+'_'+(request.direct_attempt||0),d.user_id,d.installation_id,request.id,request.connection_stage==='ping'?new Date(Math.min(new Date(request.expires_at).getTime(),Date.now()+20000)).toISOString():request.expires_at,request.connection_stage==='ping'?'ring':'notify']);
    queued += inserted.rows.length;
  }
  return queued;
+}
+export async function queueAlertStop(c,requestId,mechanicId,attempt){
+ if(!mechanicId)return;
+ const devices=(await c.query('SELECT installation_id FROM push_devices WHERE user_id=$1',[mechanicId])).rows;
+ for(const d of devices)await c.query("INSERT INTO push_outbox(event_key,user_id,installation_id,repair_request_id,kind,expires_at,alert_action) VALUES($1,$2,$3,$4,'request',CURRENT_TIMESTAMP+INTERVAL '5 minutes','stop') ON CONFLICT DO NOTHING",['stop_'+requestId+'_'+attempt,mechanicId,d.installation_id,requestId]);
 }
 export async function drainPush(pool, send, limit=20) {
  if (!send) return 0;
@@ -41,19 +47,25 @@ export async function drainPush(pool, send, limit=20) {
        FROM push_devices d JOIN users u ON u.id=d.user_id
        WHERE d.installation_id=$1 AND d.user_id=$2 AND d.updated_at>CURRENT_TIMESTAMP-INTERVAL '30 days'`,
        [row.installation_id,row.user_id])).rows[0];
-     const request = row.repair_request_id ? (await c.query('SELECT status,expires_at FROM repair_requests WHERE id=$1',[row.repair_request_id])).rows[0] : null;
-     if (!device || device.suspended || !device.is_active || new Date(row.expires_at)<=new Date() ||
-       (row.kind==='request' && (!device.availability || device.mechanic_review_status!=='approved' || request?.status!=='open' || new Date(request.expires_at)<=new Date()))) {
+     const request = row.repair_request_id ? (await c.query('SELECT status,expires_at,target_mechanic_id,connection_stage,direct_attempt FROM repair_requests WHERE id=$1',[row.repair_request_id])).rows[0] : null;
+     if (!device || (row.alert_action!=='stop' && (device.suspended || !device.is_active)) || new Date(row.expires_at)<=new Date() ||
+       (row.kind==='request' && row.alert_action!=='stop' && (!device.availability || device.mechanic_review_status!=='approved' || request?.status!=='open' || (request.target_mechanic_id && (request.target_mechanic_id!==row.user_id || !['ping','offer'].includes(request.connection_stage) || !row.event_key.endsWith('_'+request.connection_stage+'_'+request.direct_attempt))) || new Date(request.expires_at)<=new Date()))) {
        await c.query("UPDATE push_outbox SET status='skipped' WHERE id=$1",[row.id]);
        return true;
      }
      try {
-       await send({token:device.token,
+       const message={token:device.token,
          notification:{title:device.preferred_language==='fr'?(row.kind==='test'?'RESQUORA : alerte de test':'RESQUORA : demande de réparation à proximité'):(row.kind==='test'?'RESQUORA test alert':'RESQUORA: nearby repair request'),
            body:device.preferred_language==='fr'?(row.kind==='test'?'Les notifications arrivent sur ce téléphone.':'Un conducteur à proximité a besoin d’un mécanicien. Ouvrez RESQUORA pour voir les demandes.'):(row.kind==='test'?'Notifications are reaching this phone.':'A driver nearby needs a mechanic. Open RESQUORA to view available requests.')},
          data:{targetUserId:String(row.user_id),kind:row.kind,requestId:String(row.repair_request_id||''),eventId:String(row.id)},
          android:{priority:'high',ttl:Math.max(1000,Math.min(300000,new Date(row.expires_at)-Date.now())),
-           notification:{channelId:'autonex_requests',sound:'default',tag:row.event_key,icon:'ic_notification'}}});
+           notification:{channelId:'autonex_requests',sound:'default',tag:row.event_key,icon:'ic_notification'}}};
+       if(row.alert_action==='ring'||row.alert_action==='stop'){
+         const stopAttempt=row.alert_action==='stop'?row.event_key.split('_').pop():String(request.direct_attempt);
+         message.data={...message.data,alertAction:row.alert_action,attempt:stopAttempt,expiresAt:String(new Date(row.expires_at).getTime()),title:message.notification.title,body:device.preferred_language==='fr'?'Un conducteur vous sollicite. Accepter ou refuser ?':'A driver is requesting your help. Accept or decline?'};
+         delete message.notification;delete message.android.notification;
+       }
+       await send(message);
        await c.query("UPDATE push_outbox SET status='sent',sent_at=CURRENT_TIMESTAMP,attempts=attempts+1,last_error=NULL WHERE id=$1",[row.id]);
      } catch(e) {
        // Store only the SDK error code, never a token, credential or provider message.

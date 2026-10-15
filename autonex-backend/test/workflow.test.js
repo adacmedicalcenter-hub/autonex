@@ -52,7 +52,7 @@ test("PostgreSQL pilot workflow, ledger and authorization", async (t) => {
   try {
     const register = async (role, n) => {
       const u = await api("POST", "/api/auth/register", {
-        termsAccepted:true,termsVersion:'2026-10-14',user_type: role, full_name: "Test User " + n,
+        termsAccepted:true,termsVersion:'2026-10-15',user_type: role, full_name: "Test User " + n,
         phone_number: "+23760000000" + n, password: "StrongTestPassword!"
       });
       // Existing fee-workflow fixtures represent accounts that exhausted their welcome credit.
@@ -498,7 +498,7 @@ test("PostgreSQL pilot workflow, ledger and authorization", async (t) => {
       }
     );
     await t.test('20 signup credits once, no money-wallet conversion',async()=>{
-      const d=await api('POST','/api/auth/register',{termsAccepted:true,termsVersion:'2026-10-14',user_type:'driver',full_name:'Welcome Driver',phone_number:'600000006',password:'StrongTestPassword!'});
+      const d=await api('POST','/api/auth/register',{termsAccepted:true,termsVersion:'2026-10-15',user_type:'driver',full_name:'Welcome Driver',phone_number:'600000006',password:'StrongTestPassword!'});
       assert.equal((await api('GET','/api/credits',null,d)).balance,20);
       assert.equal(await grantWelcomeCredit(pool,d.userId),false);
       await api('POST','/api/auth/login',{phone_number:'600000006',password:'StrongTestPassword!'});

@@ -10,7 +10,7 @@ test('Mechanic review, private identity, selection-only chat and alert recovery'
  let tail=Promise.resolve();const pool={query:(s,p)=>db.query(s,p),connect:async()=>{const previous=tail;let release;tail=new Promise(r=>release=r);await previous;return {query:(s,p)=>db.query(s,p),release};}};
  const server=createApp(pool,{pushEnabled:true}).listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));
  const api=async(method,path,body,user,status=200)=>{const r=await fetch('http://127.0.0.1:'+server.address().port+path,{method,headers:{'Content-Type':'application/json',...(user?{Authorization:'Bearer '+user.token}:{})},...(body?{body:JSON.stringify(body)}:{})});const data=await r.json();assert.equal(r.status,status,JSON.stringify(data));return data;};
- const reg=(role,n)=>api('POST','/api/auth/register',{termsAccepted:true,termsVersion:'2026-10-14',user_type:role,full_name:'Test User '+n,phone_number:'+23762222222'+n,password:'StrongTestPassword!'});
+ const reg=(role,n)=>api('POST','/api/auth/register',{termsAccepted:true,termsVersion:'2026-10-15',user_type:role,full_name:'Test User '+n,phone_number:'+23762222222'+n,password:'StrongTestPassword!'});
  try{
  const driver=await reg('driver',1),mechanic=await reg('mechanic',2),admin=await reg('driver',3),outsider=await reg('driver',4);await db.query('UPDATE users SET is_admin=TRUE WHERE id=$1',[admin.userId]);
  const bytes=Buffer.alloc(150);bytes[0]=255;bytes[1]=216;bytes[148]=255;bytes[149]=217;const photo='data:image/jpeg;base64,'+bytes.toString('base64');
@@ -42,7 +42,7 @@ test('Mechanic review, private identity, selection-only chat and alert recovery'
   assert.equal((await db.query('SELECT COUNT(*)::int AS n FROM admin_audit')).rows[0].n,2);
  });
  await t.test('approved profile is public without document details or premature contact',async()=>{
-  const p=await api('GET','/api/users/'+mechanic.userId,null,driver);assert.equal(p.garage_name,form.garage_name);assert.equal(p.portrait,photo);assert.equal(p.identity_number,undefined);assert.equal(p.private_cipher,undefined);assert.equal(p.can_message,false);assert.equal(p.phone,null);
+  const p=await api('GET','/api/users/'+mechanic.userId,null,driver);assert.equal(p.garage_name,undefined);assert.equal(p.garage_address,undefined);assert.equal(p.garage_latitude,undefined);assert.equal(p.portrait,undefined);assert.equal(p.years_experience,8);assert.equal(p.identity_number,undefined);assert.equal(p.private_cipher,undefined);assert.equal(p.can_message,false);assert.equal(p.phone,null);
  });
  await t.test('mechanic availability + late device registration recover open nearby alerts only once',async()=>{
   await api('PATCH','/api/users/profile',{availability:true,latitude:4.075,longitude:9.675},mechanic);

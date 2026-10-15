@@ -11,10 +11,10 @@ test('Credit packages, account controls, recovery, reports and service editing',
  let tail=Promise.resolve();const pool={query:(s,p)=>db.query(s,p),connect:async()=>{const old=tail;let release;tail=new Promise(r=>release=r);await old;return {query:(s,p)=>db.query(s,p),release};}};
  const server=createApp(pool).listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));
  const api=async(method,path,body,user,status=200)=>{const r=await fetch('http://127.0.0.1:'+server.address().port+path,{method,headers:{'Content-Type':'application/json',...(user?{Authorization:'Bearer '+user.token}:{})},...(body?{body:JSON.stringify(body)}:{})});const data=await r.json();assert.equal(r.status,status,JSON.stringify(data));return data;};
- const signup=(role,n,extra={})=>api('POST','/api/auth/register',{user_type:role,full_name:'Account '+n,phone_number:'69000000'+n,password:'PasswordStrong1!',termsAccepted:true,termsVersion:'2026-10-14',...extra});
+ const signup=(role,n,extra={})=>api('POST','/api/auth/register',{user_type:role,full_name:'Account '+n,phone_number:'69000000'+n,password:'PasswordStrong1!',termsAccepted:true,termsVersion:'2026-10-15',...extra});
  try{
   await t.test('Signup requires explicit agreement and normalizes nine-digit numbers',async()=>{
-   await api('POST','/api/auth/register',{user_type:'driver',full_name:'Declined terms',phone_number:'690000000',password:'PasswordStrong1!',termsAccepted:false,termsVersion:'2026-10-14'},null,400);
+   await api('POST','/api/auth/register',{user_type:'driver',full_name:'Declined terms',phone_number:'690000000',password:'PasswordStrong1!',termsAccepted:false,termsVersion:'2026-10-15'},null,400);
    const missing=await api('POST','/api/auth/register',{user_type:'driver',full_name:'Missing terms',phone_number:'690000000',password:'PasswordStrong1!'},null,400);assert.match(missing.error,/terms/);
    await api('POST','/api/auth/login',{phone_number:'123',password:'x'},null,400);
   });

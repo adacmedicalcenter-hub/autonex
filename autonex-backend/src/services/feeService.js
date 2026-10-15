@@ -113,13 +113,12 @@ export async function releaseAllUnreleasedFees(
   );
   for (const r of rows) await releaseFee(r.id, reason, c);
 }
-export async function collectFees(journeyId, driver, mechanic, c) {
+export async function collectFees(journeyId, driver, mechanic, c, reason='10 credits charged after verified mechanic GPS arrival') {
   const j = (
     await c.query("SELECT * FROM journeys WHERE id=$1 FOR UPDATE", [journeyId])
   ).rows[0];
   if (j.both_fees_collected) return { alreadyCollected: true };
-  if (j.status !== "both_arrived")
-    throw new WorkflowError("Verified arrival required");
+  if(j.status!=='both_arrived'){const r=(await c.query('SELECT target_mechanic_id,connection_stage,status FROM repair_requests WHERE id=$1',[j.repair_request_id])).rows[0];if(!(j.status==='active'&&r.target_mechanic_id===mechanic&&r.connection_stage==='offered'&&r.status==='accepted'))throw new WorkflowError('Verified arrival or approved displacement offer required');}
   const rs = (
     await c.query(
       "SELECT * FROM connection_credit_reservations WHERE repair_request_id=$1 AND user_id IN ($2,$3) AND status='reserved' ORDER BY user_id FOR UPDATE",
@@ -162,7 +161,7 @@ export async function collectFees(journeyId, driver, mechanic, c) {
       r.amount,
       w.balance,
       w.balance - r.amount,
-      "10 credits charged after verified mechanic GPS arrival"
+      reason
     );
   }
   await c.query(

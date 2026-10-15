@@ -13,6 +13,7 @@ export async function chatJourney(c,driver,mechanic){const j=(await c.query("SEL
 
 export async function requestAudience(c,id,r,{newResponse=false}={}){
  await requireApproved(c,id);
+ if(r.target_mechanic_id){if(r.target_mechanic_id!==id||r.connection_stage==='searching')throw new WorkflowError('This request is addressed to another mechanic',403);return;}
  if(!newResponse){const assigned=(await c.query('SELECT id FROM quotes WHERE repair_request_id=$1 AND mechanic_id=$2',[r.id,id])).rows.length;if(assigned)return;}
  const u=(await c.query('SELECT availability,is_active,suspended,location_latitude,location_longitude,location_updated_at FROM users WHERE id=$1',[id])).rows[0];
  if(!u?.availability||!u.is_active||u.suspended||u.location_latitude==null||u.location_longitude==null||!u.location_updated_at||Date.now()-new Date(u.location_updated_at).getTime()>86400000||distance(r,{latitude:u.location_latitude,longitude:u.location_longitude})>5000)throw new WorkflowError('This request is outside your available 5 km area. Refresh your GPS location.',403);
