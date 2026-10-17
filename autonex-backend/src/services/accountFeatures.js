@@ -1,3 +1,4 @@
+import {adminCreditGrants} from './adminCreditGrants.js';
 import {smsRecovery} from './smsRecovery.js';
 import {createHash,randomBytes} from 'node:crypto';
 import {WorkflowError} from './feeService.js';
@@ -5,6 +6,7 @@ import {cameroonPhone} from './creditService.js';
 const digest=s=>createHash('sha256').update(s).digest('hex');
 export function accountFeatures({route,pool,tx,auth,admin}) {
  smsRecovery({route,pool,tx});
+ adminCreditGrants({route,tx,auth,admin});
  route('post','/api/admin/users/:id/status',req=>tx(async c=>{
   const {action,reason}=req.body;
   if(!['block','unblock','deactivate','reactivate'].includes(action)||!String(reason||'').trim())throw new WorkflowError('Choose an action and give a reason',400);
@@ -72,7 +74,7 @@ export function accountFeatures({route,pool,tx,auth,admin}) {
   const transactions=(await pool.query('SELECT * FROM connection_credit_transactions WHERE '+period+' ORDER BY id',[start])).rows;
   const requests=(await pool.query('SELECT id,driver_id,title,vehicle_type,location,status,created_at FROM repair_requests WHERE '+period+' ORDER BY id',[start])).rows;
   const purchases=(await pool.query('SELECT * FROM connection_credit_purchases WHERE '+period+' ORDER BY created_at',[start])).rows;
-  const summary={adRewardCredits:transactions.filter(t=>t.transaction_type==='ad_reward'&&t.source==='admob').reduce((a,t)=>a+t.amount,0),testAdRewardCredits:transactions.filter(t=>t.transaction_type==='ad_reward'&&t.source==='ad_test').reduce((a,t)=>a+t.amount,0),newUsers:users.length,requestsCreated:requests.length,connectionsCreated:journeys.length,creditsCharged:transactions.filter(t=>t.transaction_type==='fee_collection').reduce((a,t)=>a-t.amount,0),creditsRefunded:transactions.filter(t=>t.transaction_type==='refund').reduce((a,t)=>a+t.amount,0),realSalesXaf:purchases.filter(p=>p.status==='paid'&&p.provider!=='test').reduce((a,p)=>a+p.amount_xaf,0),simulatedSalesXaf:purchases.filter(p=>p.status==='paid'&&p.provider==='test').reduce((a,p)=>a+p.amount_xaf,0)};
+  const summary={adminGrantedCredits:transactions.filter(t=>t.transaction_type==='admin_grant').reduce((a,t)=>a+t.amount,0),adRewardCredits:transactions.filter(t=>t.transaction_type==='ad_reward'&&t.source==='admob').reduce((a,t)=>a+t.amount,0),testAdRewardCredits:transactions.filter(t=>t.transaction_type==='ad_reward'&&t.source==='ad_test').reduce((a,t)=>a+t.amount,0),newUsers:users.length,requestsCreated:requests.length,connectionsCreated:journeys.length,creditsCharged:transactions.filter(t=>t.transaction_type==='fee_collection').reduce((a,t)=>a-t.amount,0),creditsRefunded:transactions.filter(t=>t.transaction_type==='refund').reduce((a,t)=>a+t.amount,0),realSalesXaf:purchases.filter(p=>p.status==='paid'&&p.provider!=='test').reduce((a,p)=>a+p.amount_xaf,0),simulatedSalesXaf:purchases.filter(p=>p.status==='paid'&&p.provider==='test').reduce((a,p)=>a+p.amount_xaf,0)};
   await pool.query("INSERT INTO admin_audit(admin_id,action,details) VALUES($1,'export_monthly_report',$2)",[req.user.id,JSON.stringify({month})]);
   return {month,timezone:'Africa/Douala',generatedAt:new Date().toISOString(),summary,users,requests,journeys,transactions,purchases};
  },auth,admin);
