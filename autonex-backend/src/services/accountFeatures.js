@@ -5,6 +5,7 @@ import {WorkflowError} from './feeService.js';
 import {cameroonPhone} from './creditService.js';
 const digest=s=>createHash('sha256').update(s).digest('hex');
 export function accountFeatures({route,pool,tx,auth,admin}) {
+ route('get','/api/admin/deleted-demo-history',async()=> (await pool.query("SELECT id,created_at,details FROM admin_audit WHERE action='deleted_demo_reporting_history' ORDER BY id DESC")).rows,auth,admin);
  smsRecovery({route,pool,tx});
  adminCreditGrants({route,tx,auth,admin});
  route('post','/api/admin/users/:id/status',req=>tx(async c=>{
